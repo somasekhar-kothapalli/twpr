@@ -1,1 +1,1 @@
-# TWPR (The Weekly Petroleum Report) setup
+# TWPR (The Weekly Petroleum Report) - TradeDesk's Setup 2
