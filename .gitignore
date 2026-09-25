@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Pipeline data IS committed (the Actions runner is ephemeral, and the history
+# doubles as the audit trail). Only position-level files stay local.
+data/active_trade.json
+data/journal.json
+data/journal_export.csv

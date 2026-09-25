@@ -1,0 +1,85 @@
+name: TWPR EIA Signal
+
+# Wednesday 20:00 IST = Wednesday 14:30 UTC.
+on:
+  schedule:
+    - cron: "30 14 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: twpr-data
+  cancel-in-progress: false
+
+jobs:
+  eia-signal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Pre-brief
+        env:
+          EIA_API_KEY: ${{ secrets.EIA_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ vars.GROQ_MODEL }}
+          MODEL_MODE: ${{ vars.MODEL_MODE }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PETROCORE_URL: ${{ secrets.PETROCORE_URL }}
+          PETROCORE_API_KEY: ${{ secrets.PETROCORE_API_KEY }}
+          TWPR_TRADE_TYPE: ${{ vars.TWPR_TRADE_TYPE }}
+        run: python app/telegram_bot.py --prebrief
+
+      - name: Parse EIA WPSR
+        env:
+          EIA_API_KEY: ${{ secrets.EIA_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ vars.GROQ_MODEL }}
+          MODEL_MODE: ${{ vars.MODEL_MODE }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PETROCORE_URL: ${{ secrets.PETROCORE_URL }}
+          PETROCORE_API_KEY: ${{ secrets.PETROCORE_API_KEY }}
+          TWPR_TRADE_TYPE: ${{ vars.TWPR_TRADE_TYPE }}
+        run: python app/eia_parser.py
+
+      - name: Generate signal
+        env:
+          EIA_API_KEY: ${{ secrets.EIA_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ vars.GROQ_MODEL }}
+          MODEL_MODE: ${{ vars.MODEL_MODE }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PETROCORE_URL: ${{ secrets.PETROCORE_URL }}
+          PETROCORE_API_KEY: ${{ secrets.PETROCORE_API_KEY }}
+          TWPR_TRADE_TYPE: ${{ vars.TWPR_TRADE_TYPE }}
+        run: python app/signal_engine.py
+
+      - name: Send alert
+        env:
+          EIA_API_KEY: ${{ secrets.EIA_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ vars.GROQ_MODEL }}
+          MODEL_MODE: ${{ vars.MODEL_MODE }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PETROCORE_URL: ${{ secrets.PETROCORE_URL }}
+          PETROCORE_API_KEY: ${{ secrets.PETROCORE_API_KEY }}
+          TWPR_TRADE_TYPE: ${{ vars.TWPR_TRADE_TYPE }}
+        run: python app/telegram_bot.py
+
+      - name: Commit data
+        run: |
+          git config user.name  "twpr-bot"
+          git config user.email "twpr-bot@users.noreply.github.com"
+          git add data/
+          git diff --staged --quiet || git commit -m "data: EIA actuals and signal"
+          git push

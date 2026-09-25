@@ -1,0 +1,29 @@
+{
+  "week_ending": "2026-09-04",
+  "note": "Known-good week used to validate the signal engine end to end. Only the crude leg has published raw EIA/consensus values in the spec; the product legs are recorded as deviations.",
+  "inputs": {
+    "crude": {
+      "eia_crude_change_mb": -0.391,
+      "consensus_crude_mb": -1.6
+    },
+    "deviations": {
+      "crude_deviation_mb": 1.209,
+      "gasoline_deviation_mb": 2.669,
+      "distillate_deviation_mb": 2.787
+    },
+    "cushing_mb": -0.684,
+    "api_crude_mb": 1.25
+  },
+  "expected": {
+    "crude_deviation_mb": 1.209,
+    "grade": "B",
+    "direction": "bearish",
+    "confidence": 55,
+    "option_type": "put",
+    "strike_type": "1-OTM",
+    "size_pct": 1.5,
+    "cushing_confirms": false,
+    "api_aligns": true,
+    "products_strongly_oppose": true
+  }
+}
