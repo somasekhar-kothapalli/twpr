@@ -25,13 +25,13 @@ Wed      20:05  monitor.py             exit monitor, hard close 22:30 IST
 
 | Component | State | How it was checked |
 | --------- | ----- | ------------------ |
-| `signal_engine.py` | done | 26 tests green; reference week end-to-end on fixtures |
+| `signal_engine.py` | done | 31 tests green; reference week end-to-end on fixtures |
 | `petrocore_client.py` | done | 10s timeout, 2×2s retry on 5xx, never raises; skip path exercised |
 | `market_data.py` | done | live yfinance fetch; derived columns checked against the spec example |
 | `eia_parser.py` | needs a live run | polling and change maths done; series ids unconfirmed (no API key yet) |
 | `telegram_bot.py` | done | all five message shapes rendered (signal, skip, stop, target, hard close) |
 | `monitor.py` | done | exit conditions incl. partial T1 then hard close on a 4-lot position |
-| `journal.py` | done | P&L, stats and the empty-journal case rendered |
+| `journal.py` | done | P&L and charges unit-tested; stats and empty-journal case rendered |
 | `scheduler.py` | done | `--next` prints the correct IST cron times |
 | `consensus_fetcher.py` | manual input | no scraper exists yet — see *Not wired up* |
 | `api_monitor.py` | manual input | same |
@@ -127,10 +127,11 @@ python -m pytest tests/ -q
 python -m pytest tests/test_signal_engine.py::test_reference_week_sep4_2026 -v
 ```
 
-26 tests, all on the rule engine: skip zone and grade boundaries (both
+31 tests. The rule engine: skip zone and grade boundaries (both
 inclusive), the Cushing downgrade and its B floor, API alignment, the confidence
 grid, determinism over repeated runs, and the Sep 4 2026 reference week —
 deviation +1.209 mb must come out Grade B bearish at confidence 55, every time.
+The journal: CTT, brokerage and net P&L on the worked example.
 
 ## Layout
 
@@ -166,14 +167,6 @@ data/                    pipeline output; reference_week.json is the fixture
   export stay local.
 - **No invented scrapers.** A wrong consensus number corrupts every downstream
   signal, so the fetchers ask rather than guess.
-
-## Open question
-
-The spec's CTT formula and its worked example disagree. The formula
-`entry_premium × lots × 100 × 0.0005` gives **₹41** on an 820 premium, 1 lot;
-the example JSON says `ctt_charge: 820.0`, which is 1% and happens to equal the
-premium exactly. `journal.py` implements the formula, so that trade nets
-−32,881 rather than −33,660. Confirm which is right before any live trade.
 
 ## Not wired up yet
 

@@ -162,6 +162,11 @@ net_pnl    = gross_pnl - ctt_charge - brokerage
 return_pct = (exit_premium - entry_premium) / entry_premium * 100
 ```
 
+CTT is 0.05% of the **entry premium**, so an 820 premium on 1 lot costs ₹41 and
+that trade nets −32,881. An early draft of this spec carried a worked example
+with `ctt_charge: 820.0` (1% — it happened to equal the premium); that example
+was wrong. Confirmed 2026-09-25. `tests/test_journal.py` pins the arithmetic.
+
 ## Reference week — Sep 4, 2026
 
 Committed as `data/reference_week.json` and asserted by
