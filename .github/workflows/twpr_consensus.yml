@@ -24,6 +24,10 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
 
+      - name: Install Chromium for the investing.com fallback
+        run: python -m playwright install --with-deps chromium
+
+
       - name: Fetch consensus
         env:
           EIA_API_KEY: ${{ secrets.EIA_API_KEY }}

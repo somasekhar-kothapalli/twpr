@@ -107,6 +107,46 @@ Two boundary details that are easy to get backwards:
 - `week_ending()` returns the Friday the EIA report covers — the previous Friday
   from a Tuesday or Wednesday run, which is what every script wants.
 
+### Consensus sources
+
+Both scrapers exist and are tried in this order by `consensus_fetcher.py` and
+`api_monitor.py`, after explicit CLI flags and before the terminal prompt:
+
+1. `tradingeconomics_scraper` — plain HTTP, ~1s. The calendar tables are in the
+   served HTML. This is the primary.
+2. `investing_scraper` — headless Chromium via Playwright, ~15s. investing.com
+   returns 403 to plain HTTP on every route including its JSON endpoints, and
+   Cloudflare challenges every page after the first, so it loads the calendar
+   once and calls the calendar's own data service from inside that session. One
+   request covers every indicator.
+
+Both return `None` rather than a partial dict, and both take an optional
+`week` argument; the fetchers pass the week through so a scraper can never
+fetch a different week than the payload is labelled with.
+
+Two traps the parsers exist to avoid:
+
+- **Blank cells are positional.** An empty `Actual` marks an unreleased row. A
+  parser that filters blanks shifts Previous into Actual and reads last week's
+  number as this week's.
+- **Trading Economics' API summary table is undated.** Its "Last" column is
+  always the newest release, so `fetch_api_report` refuses any week that is not
+  the latest released one — otherwise the Cushing, gasoline and distillate legs
+  silently come from a different week than crude.
+
+`investing_scraper.fetch_api_report()` always returns `None`: the US calendar
+carries only the crude leg of the API report, so it cannot fill the four fields
+`api_monitor` requires. Trading Economics is the only source for that report.
+`fetch_api_crude_only()` is there for cross-checking and is not part of the
+fetcher contract.
+
+The two sources agree exactly on actuals. Crude *consensus* differs by ~0.1 mb
+(TE -0.6 vs investing -0.7 for week ending 2026-09-18) because they poll
+different survey panels. That is expected, not a bug.
+
+Running the scrapers needs `python -m playwright install chromium` once; the
+consensus and api_monitor workflows do it in CI.
+
 ### GitHub Actions runs the same scripts
 
 The four workflows in `.github/workflows/` run the same commands on cron and then
@@ -116,11 +156,8 @@ JSON is how Wednesday's signal sees Tuesday's consensus. `data/active_trade.json
 
 ## Not wired up
 
-- `investing_scraper.py` / `tradingeconomics_scraper.py` do not exist.
-  `consensus_fetcher.py` and `api_monitor.py` look for them by name and use
-  `fetch_consensus()` / `fetch_api_report()` if found; otherwise they take CLI
-  flags or prompt. Do not replace this with invented scraping code — a wrong
-  consensus number is worse than no number.
+- Angel One SmartAPI (below) and one live EIA key run. The consensus scrapers
+  are built — see **Consensus sources**.
 - Angel One SmartAPI. `monitor.py:read_current_premium` prompts for the premium
   each minute; that function is the single seam to replace.
 - The EIA weekly series ids in `eia_parser.py` need one live run with a real

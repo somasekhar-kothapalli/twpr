@@ -33,8 +33,10 @@ Wed      20:05  monitor.py             exit monitor, hard close 22:30 IST
 | `monitor.py` | done | exit conditions incl. partial T1 then hard close on a 4-lot position |
 | `journal.py` | done | P&L and charges unit-tested; stats and empty-journal case rendered |
 | `scheduler.py` | done | `--next` prints the correct IST cron times |
-| `consensus_fetcher.py` | manual input | no scraper exists yet — see *Not wired up* |
-| `api_monitor.py` | manual input | same |
+| `consensus_fetcher.py` | done | live scrape from both sources; fallback chain tested |
+| `api_monitor.py` | done | live scrape from Trading Economics |
+| `tradingeconomics_scraper.py` | done | plain HTTP; live consensus + API report |
+| `investing_scraper.py` | done | headless Chromium; live consensus |
 | GitHub Actions | done | 4 workflows, YAML validated |
 
 Not yet proven: a full live Wednesday. Everything above the EIA row runs on real
@@ -143,6 +145,8 @@ app/
   market_data.py         yfinance + EIA futures
   consensus_fetcher.py   Tuesday consensus
   api_monitor.py         API private report
+  tradingeconomics_scraper.py  consensus + API report, plain HTTP (primary)
+  investing_scraper.py         consensus via headless Chromium (fallback)
   eia_parser.py          EIA WPSR actuals
   signal_engine.py       the 5-step rule engine
   monitor.py             post-signal exit monitor
@@ -170,10 +174,6 @@ data/                    pipeline output; reference_week.json is the fixture
 
 ## Not wired up yet
 
-- `investing_scraper.py` / `tradingeconomics_scraper.py` — the consensus and API
-  fetchers take numbers from CLI flags or the terminal until these exist. Drop in
-  a module exposing `fetch_consensus()` / `fetch_api_report()` and they are
-  picked up automatically.
 - Angel One SmartAPI — `monitor.py` prompts for the option premium each minute.
   `read_current_premium()` is the single function to replace.
 - EIA weekly series ids in `eia_parser.py` (`WCESTUS1`,

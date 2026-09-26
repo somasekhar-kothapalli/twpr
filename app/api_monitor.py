@@ -14,6 +14,7 @@ import argparse
 import logging
 import sys
 import time
+from inspect import signature
 
 from dotenv import load_dotenv
 
@@ -38,8 +39,8 @@ POLL_INTERVAL_SECONDS = 300
 POLL_TIMEOUT_SECONDS = 4 * 60 * 60
 
 
-def _from_scraper(module_name: str) -> tuple[dict, str] | None:
-    """Try `module_name.fetch_api_report()`. Returns None when absent or failing."""
+def _from_scraper(module_name: str, week: str) -> tuple[dict, str] | None:
+    """Try `module_name.fetch_api_report(week)`. Returns None when absent or failing."""
     try:
         module = __import__(module_name)
     except ImportError:
@@ -52,7 +53,8 @@ def _from_scraper(module_name: str) -> tuple[dict, str] | None:
         return None
 
     try:
-        data = fetcher()
+        # Pass the week when accepted, so the fetch and the saved label agree.
+        data = fetcher(week) if signature(fetcher).parameters else fetcher()
     except Exception as exc:  # noqa: BLE001 — a broken scraper must not kill the run
         logger.error("%s.fetch_api_report() failed: %s", module_name, exc)
         return None
@@ -84,7 +86,7 @@ def _from_prompt() -> tuple[dict, str]:
     return values, "manual"
 
 
-def poll_for_report(args: argparse.Namespace) -> tuple[dict, str]:
+def poll_for_report(args: argparse.Namespace, week: str) -> tuple[dict, str]:
     """Resolve the API report, polling the scrapers until the timeout."""
     if args.crude is not None:
         if None in (args.cushing, args.gasoline, args.distillate):
@@ -101,8 +103,8 @@ def poll_for_report(args: argparse.Namespace) -> tuple[dict, str]:
 
     deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
     while True:
-        for module_name in ("investing_scraper", "tradingeconomics_scraper"):
-            result = _from_scraper(module_name)
+        for module_name in ("tradingeconomics_scraper", "investing_scraper"):
+            result = _from_scraper(module_name, week)
             if result is not None:
                 return result
 
@@ -114,7 +116,7 @@ def poll_for_report(args: argparse.Namespace) -> tuple[dict, str]:
     if args.no_prompt:
         raise RuntimeError(
             "API report unavailable: pass --crude/--cushing/--gasoline/--distillate, "
-            "or add app/investing_scraper.py with a fetch_api_report() function"
+            "or check why tradingeconomics_scraper/investing_scraper returned no fetch_api_report()"
         )
 
     return _from_prompt()
@@ -142,7 +144,7 @@ def main() -> int:
             logger.info("API report for %s already saved — nothing to do", week)
             return 0
 
-        values, source = poll_for_report(args)
+        values, source = poll_for_report(args, week)
         payload = {
             "week_ending": week,
             "report_date": now_utc().date().isoformat(),

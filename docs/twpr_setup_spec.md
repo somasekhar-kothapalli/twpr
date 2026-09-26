@@ -203,11 +203,12 @@ back to `rule_based` and the signal still ships.
   `W_EPC0_SAX_YCUOK_MBBL`, `WGTSTUS1`, `WDISTUS1`, `WPULEUS3`) need one live run
   against a real `EIA_API_KEY` to confirm. They are the first thing to check if
   a Wednesday run returns no rows.
-- **Consensus and API report sources.** `investing_scraper.py` and
-  `tradingeconomics_scraper.py` do not exist in this repo. Until they do, both
-  fetchers take the numbers from CLI flags or the terminal. Each expects
-  `fetch_consensus()` / `fetch_api_report()` returning the field names in
-  `FIELDS`, and will pick the module up automatically once it is added.
+- **Consensus source disagreement.** Trading Economics and investing.com poll
+  different survey panels, so the crude consensus can differ by ~0.1 mb (for
+  week ending 2026-09-18: TE -0.6, investing -0.7). Actuals agree exactly.
+  Trading Economics is tried first, so it is the de facto consensus of record;
+  which source a week used is recorded in `consensus.json`'s `source` field.
+  A 0.1 mb difference can move a deviation across the 1.0 or 1.5 threshold.
 - **Live premium.** `monitor.py` prompts for the premium each minute. Angel One
   SmartAPI replaces `read_current_premium()` when the credentials are wired up.
 - **MCX close** in `market_data.py` is `wti_close × usd_inr_close`, an

@@ -2,8 +2,8 @@
 
 Runs Tuesday 19:00 IST. Source order:
   1. CLI flags (--crude/--gasoline/--distillate/--previous) — always wins
-  2. app/investing_scraper.py, if present, via `fetch_consensus()`
-  3. app/tradingeconomics_scraper.py, if present, via `fetch_consensus()`
+  2. tradingeconomics_scraper.fetch_consensus()  (plain HTTP, tried first)
+  3. investing_scraper.fetch_consensus()         (headless browser fallback)
   4. interactive prompt (unless --no-prompt)
 
 The consensus is the denominator of every signal, so a wrong or stale number is
@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from inspect import signature
 
 from dotenv import load_dotenv
 
@@ -36,8 +37,8 @@ FIELDS = {
 }
 
 
-def _from_scraper(module_name: str) -> tuple[dict, str] | None:
-    """Try `module_name.fetch_consensus()`. Returns None when absent or failing."""
+def _from_scraper(module_name: str, week: str) -> tuple[dict, str] | None:
+    """Try `module_name.fetch_consensus(week)`. Returns None when absent or failing."""
     try:
         module = __import__(module_name)
     except ImportError:
@@ -50,9 +51,15 @@ def _from_scraper(module_name: str) -> tuple[dict, str] | None:
         return None
 
     try:
-        data = fetcher()
+        # Pass the week when the scraper accepts one, so it never fetches a
+        # different week than the payload is about to be labelled with.
+        data = fetcher(week) if signature(fetcher).parameters else fetcher()
     except Exception as exc:  # noqa: BLE001 — a broken scraper must not kill the run
         logger.error("%s.fetch_consensus() failed: %s", module_name, exc)
+        return None
+
+    if not data:
+        logger.info("%s: no consensus available for %s", module_name, week)
         return None
 
     missing = [f for f in FIELDS if f not in data]
@@ -78,7 +85,7 @@ def _from_prompt() -> tuple[dict, str]:
     return values, "manual"
 
 
-def fetch_consensus(args: argparse.Namespace) -> tuple[dict, str]:
+def fetch_consensus(args: argparse.Namespace, week: str) -> tuple[dict, str]:
     """Resolve the consensus from CLI flags, a scraper, or the terminal."""
     if args.crude is not None:
         if None in (args.gasoline, args.distillate, args.previous):
@@ -93,15 +100,15 @@ def fetch_consensus(args: argparse.Namespace) -> tuple[dict, str]:
             "manual",
         )
 
-    for module_name in ("investing_scraper", "tradingeconomics_scraper"):
-        result = _from_scraper(module_name)
+    for module_name in ("tradingeconomics_scraper", "investing_scraper"):
+        result = _from_scraper(module_name, week)
         if result is not None:
             return result
 
     if args.no_prompt:
         raise RuntimeError(
             "No consensus source available: pass --crude/--gasoline/--distillate/--previous, "
-            "or add app/investing_scraper.py with a fetch_consensus() function"
+            "or check why tradingeconomics_scraper/investing_scraper returned no fetch_consensus()"
         )
 
     return _from_prompt()
@@ -122,9 +129,10 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        values, source = fetch_consensus(args)
+        week = args.week or week_ending()
+        values, source = fetch_consensus(args, week)
         payload = {
-            "week_ending": args.week or week_ending(),
+            "week_ending": week,
             **values,
             "source": source,
             "fetched_at": now_utc().isoformat(),
