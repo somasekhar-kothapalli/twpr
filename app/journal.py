@@ -68,9 +68,17 @@ def _prompt(label: str, default: object = None, cast=str):
     """Read one value from the terminal, falling back to `default` on blank input."""
     suffix = f" [{default}]" if default is not None else ""
     while True:
-        raw = input(f"  {label}{suffix}: ").strip()
-        if not raw and default is not None:
-            return default
+        try:
+            raw = input(f"  {label}{suffix}: ").strip()
+        except EOFError as exc:
+            # Ctrl+D, or a piped run that ran out of lines. Half a trade row is
+            # worse than none, so stop rather than save a partial record.
+            raise RuntimeError(f"input ended while waiting for {label!r}") from exc
+        if not raw:
+            if default is not None:
+                return default
+            print("    Required — no default for this field")
+            continue
         try:
             return cast(raw)
         except ValueError:
@@ -129,10 +137,14 @@ def log_trade() -> dict:
     trades.append(trade)
     save_trades(trades)
 
+    # Pre-formatted: %-style logging has no comma flag, only f-strings do.
     logger.info(
-        "Logged trade #%d: %s %s | net ₹%+,.0f (%+.1f%%)",
-        trade["trade_id"], trade["grade"], trade["direction"],
-        trade["net_pnl"], trade["return_pct"],
+        "Logged trade #%d: %s %s | net %s (%+.1f%%)",
+        trade["trade_id"],
+        trade["grade"],
+        trade["direction"],
+        f"₹{trade['net_pnl']:+,.0f}",
+        trade["return_pct"],
     )
     PetroCoreClient().post_trade(trade)
     return trade
@@ -158,7 +170,9 @@ def summarize(trades: list[dict], title: str) -> str:
 
     gross_win = sum(t["net_pnl"] for t in wins)
     gross_loss = abs(sum(t["net_pnl"] for t in losses))
-    profit_factor = gross_win / gross_loss if gross_loss else float("inf")
+    # No losses yet means profit factor is undefined, not infinite — "inf" in a
+    # money report reads like a bug.
+    profit_factor = f"{gross_win / gross_loss:.2f}" if gross_loss else "n/a"
 
     lines = [
         HEADER,
@@ -175,7 +189,7 @@ def summarize(trades: list[dict], title: str) -> str:
         lines.append(f"Avg winner:     {sum(t['return_pct'] for t in wins) / len(wins):+.1f}%")
     if losses:
         lines.append(f"Avg loser:      {sum(t['return_pct'] for t in losses) / len(losses):+.1f}%")
-    lines.append(f"Profit factor:  {profit_factor:.2f}")
+    lines.append(f"Profit factor:  {profit_factor}")
     lines.append("")
 
     for grade in ("A", "B"):

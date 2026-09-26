@@ -14,7 +14,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "app"))
 
-from journal import BROKERAGE_PER_LEG, CTT_RATE, LOT_SIZE, calculate_pnl  # noqa: E402
+from journal import (  # noqa: E402
+    BROKERAGE_PER_LEG,
+    CTT_RATE,
+    LOT_SIZE,
+    calculate_pnl,
+    summarize,
+)
 
 
 def test_losing_trade_reference_case():
@@ -60,3 +66,43 @@ def test_breakeven_premium_still_loses_the_charges():
     assert result["gross_pnl"] == 0.0
     assert result["return_pct"] == 0.0
     assert result["net_pnl"] == -(820.0 * LOT_SIZE * CTT_RATE + BROKERAGE_PER_LEG * 2)
+
+
+# --- summary rendering -----------------------------------------------------
+
+TRADE = {
+    "net_pnl": 1000.0,
+    "return_pct": 10.0,
+    "grade": "A",
+    "trade_type": "paper",
+    "exit_type": "target_1",
+    "week_ending": "2026-09-04",
+}
+
+
+def test_profit_factor_is_not_inf_when_there_are_no_losses():
+    """A money report showing "inf" reads like a bug."""
+    out = summarize([TRADE], "Sep 2026")
+    assert "Profit factor:  n/a" in out
+    assert "inf" not in out
+
+
+def test_profit_factor_computed_when_losses_exist():
+    loser = {**TRADE, "net_pnl": -500.0, "return_pct": -20.0, "exit_type": "stop"}
+    out = summarize([TRADE, loser], "Sep 2026")
+    assert "Profit factor:  2.00" in out  # 1000 / 500
+
+
+def test_empty_journal_renders_without_dividing_by_zero():
+    out = summarize([], "week of 2026-09-21")
+    assert "No trades logged." in out
+
+
+def test_money_fields_use_f_string_formatting():
+    """%-style logging has no comma flag; the thousands separator needs an f-string.
+
+    Regression guard: `logger.info("... %+,.0f", x)` silently logged nothing.
+    """
+    with pytest.raises(ValueError, match="unsupported format character"):
+        _ = "%+,.0f" % -32881.0
+    assert f"{-32881.0:+,.0f}" == "-32,881"
