@@ -94,10 +94,21 @@ def _strike_lines(signal: dict) -> list[str]:
 def format_signal(signal: dict) -> str:
     """Render a signal dict as the Wednesday Telegram alert."""
     if signal.get("grade") == "skip":
+        deviation = signal.get("crude_deviation_mb")
+        if signal.get("skip_reason") == "expiry":
+            # Worth distinguishing: the data said trade, the calendar said no.
+            return (
+                "⚪ TWPR — NO TRADE (expiry)\n"
+                f"Week ending {signal.get('week_ending')}\n"
+                f"Crude deviation: {deviation:+.3f} mb — tradeable on the data\n"
+                f"But the near-month option expires {signal.get('option_expiry')}, "
+                f"{signal.get('days_to_expiry')} day(s) away.\n"
+                "Too little life left for a -40%/+50% structure. No position."
+            )
         return (
             "⚪ TWPR — NO TRADE\n"
             f"Week ending {signal.get('week_ending')}\n"
-            f"Crude deviation: {signal.get('crude_deviation_mb'):+.3f} mb "
+            f"Crude deviation: {deviation:+.3f} mb "
             "(inside the ±1.0 skip zone)\n"
             "No position this week."
         )
@@ -117,6 +128,10 @@ def format_signal(signal: dict) -> str:
         f"Trade: {str(signal.get('option_type', '')).upper()} "
         f"{signal.get('strike_type')} | size {signal.get('size_pct')}% of capital",
         f"Confidence: {signal.get('confidence')}",
+        f"Expiry: {signal.get('option_expiry')} "
+        f"({signal.get('days_to_expiry')} days)"
+        if signal.get("days_to_expiry") is not None
+        else "Expiry: unknown — check the chain",
     ]
 
     lines.extend(_strike_lines(signal))

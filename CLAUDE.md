@@ -73,6 +73,31 @@ Three invariants hold this together:
 to `rule_based_narrative()` and the signal still ships. If a change would let a
 model output affect a number a trade is sized on, it is wrong.
 
+### Step 0 — the days-to-expiry gate
+
+`app/expiry.py` plus `signal_engine.apply_expiry_gate()`. Below
+`MIN_DAYS_TO_EXPIRY` (3 calendar days, inclusive floor) the week is forced to
+`grade='skip'` with `skip_reason='expiry'`, and the trade recommendation is
+cleared. The inventory read stays on the record.
+
+It is a gate on the engine's output, **not** a sixth rule — `generate_signal()`
+still takes exactly the five inventory numbers, and two tests assert that
+signature. Keep it that way: the reference week is pinned to the pure function.
+
+Three things that are easy to get wrong here:
+
+- **An unknown DTE does not gate.** A missing or stale `data/expiries.json` is an
+  infrastructure failure; failing closed would silently cancel a week over a cache
+  miss. It warns and trades. See `expiry.is_tradeable`.
+- **A deviation skip keeps `skip_reason='deviation'`.** The gate must not relabel
+  a skip the data already caused.
+- MCX crude **options expire 2-4 days before the futures**, which is the whole
+  reason this exists. Do not compute expiry from the futures contract.
+
+The calendar comes from Zerodha's instrument master and is refreshed by
+`market_data.py` on its 09:00 run, so the Wednesday signal path reads a file
+rather than downloading 9MB at 20:00.
+
 ### Currency context is informational, deliberately
 
 `app/currency.py` adds the INR fields to a signal — `usd_inr_trend_pct`,

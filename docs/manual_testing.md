@@ -84,7 +84,7 @@ use `2026-09-18`; substitute a released week when you read this.
 python -m pytest tests/ -q
 ```
 
-Expect `143 passed, 4 deselected` — the deselected four are the
+Expect `172 passed, 4 deselected` — the deselected four are the
 network-backed strike-interval checks. These are all offline. If this fails, stop here — nothing
 below will be meaningful.
 
@@ -471,6 +471,79 @@ python -m pytest tests/test_currency.py -k "cannot_move or reference_week" -v
 
 **What to check.** `generate_signal()` still takes exactly the five inventory
 numbers and no currency argument, and the reference week is still B bearish 55.
+
+---
+
+## 5c. The days-to-expiry gate
+
+Below 3 calendar days to option expiry the week is skipped whatever the deviation
+says. The calendar is cached in `data/expiries.json` and refreshed by
+`market_data.py`.
+
+```bash
+python -c "import sys;sys.path.insert(0,'app');from common import setup_logging;setup_logging();from expiry import refresh_cache;refresh_cache()"
+cat data/expiries.json
+```
+
+**What to check.** Monthly expiries around the 15th–17th. Confirm they are the
+*option* expiries, not the futures ones — they differ by 2–4 days.
+
+The gate across the boundary, no network:
+
+```bash
+python - <<'EOF'
+import sys; sys.path.insert(0,'app')
+from common import setup_logging; setup_logging()
+from signal_engine import generate_signal, apply_expiry_gate
+for dte in (18, 3, 2, 0, None):
+    s = apply_expiry_gate(generate_signal(1.6, 0, 0, 1.0, 1.0), dte)
+    print(f"  dte {str(dte):5} -> {s.grade:4} {s.direction:7} conf {s.confidence:3} "
+          f"opt {str(s.option_type):5} reason {s.skip_reason}")
+EOF
+```
+
+**What to check.** 18 and 3 trade as Grade A (the floor is inclusive), 2 and 0
+become `skip` with `reason expiry` and no trade recommendation, and `None` trades
+— an unknown DTE must not silently cancel a week over a cache miss.
+
+A deviation skip must keep its own reason:
+
+```bash
+python -c "import sys;sys.path.insert(0,'app');from signal_engine import generate_signal,apply_expiry_gate;s=apply_expiry_gate(generate_signal(0.4,0,0,0,0),1);print(s.grade, s.skip_reason)"
+```
+
+**What to check.** `skip deviation` — not `expiry`. The gate must not relabel a
+skip the data already caused.
+
+End to end with a stale calendar, so the fallback fetch runs:
+
+```bash
+rm -f data/expiries.json && python app/signal_engine.py 2>&1 | grep -E "Near-month|calendar|Signal:"
+python -c "import json;s=json.load(open('data/signal.json'));print({k:s[k] for k in ('option_expiry','days_to_expiry','skip_reason','grade')})"
+```
+
+**What to check.** It fetches once, caches, and reports a real expiry. With no
+network it logs the failure, reports `days_to_expiry: null`, still produces a
+signal, and adds the "check the option chain" risk note.
+
+The two alert shapes:
+
+```bash
+python - <<'EOF'
+import sys; sys.path.insert(0,'app')
+from common import setup_logging; setup_logging()
+from telegram_bot import format_signal
+print(format_signal({"grade":"skip","skip_reason":"expiry","week_ending":"2026-10-16",
+  "crude_deviation_mb":2.4,"option_expiry":"2026-10-15","days_to_expiry":1}))
+print()
+print(format_signal({"grade":"skip","skip_reason":"deviation","week_ending":"2026-09-18",
+  "crude_deviation_mb":0.4}))
+EOF
+```
+
+**What to check.** The expiry skip says "tradeable on the data" and names the
+expiry — you should be able to tell at a glance that the setup was good and the
+calendar vetoed it, not that the data was dull.
 
 ---
 

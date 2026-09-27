@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 
 from common import DATA_DIR, env, now_utc, setup_logging, write_json
 from currency import classify, trend_pct
+from expiry import refresh_cache
 from petrocore_client import PetroCoreClient
 from telegram_bot import send_error
 
@@ -192,6 +193,10 @@ def main() -> int:
             latest["usd_inr_trend_pct"] or 0.0,
             classify(latest["usd_inr_trend_pct"]),
         )
+
+        # Keep the option expiry calendar warm here, on the 09:00 run, so the
+        # Wednesday signal path reads a file instead of the network.
+        refresh_cache()
 
         client = PetroCoreClient()
         for row in rows:

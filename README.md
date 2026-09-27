@@ -111,6 +111,11 @@ crude_deviation_mb = eia_crude_change - consensus_crude
 | `1.0 < d < 1.5` | B | bearish | put | 1-OTM | 1.5% |
 | `d >= 1.5` | A | bearish | put | ATM | 2.0% |
 
+Before any of it, a **days-to-expiry gate**: if the near-month option has fewer
+than 3 calendar days left the week is skipped outright, whatever the deviation.
+MCX crude options expire 2–4 days *before* the futures, and a near-dead option has
+the wrong gamma and spread for a −40%/+50% structure. Costs ~7 of 52 weeks.
+
 Then: Cushing moving against the direction downgrades A to B (B is the floor);
 a strong same-way move in products is noted as a risk only; confidence is
 `75/55 ± 5 (Cushing) ± 5 (API)`, range 45–85.
@@ -172,6 +177,7 @@ app/
   monitor.py             post-signal exit monitor
   journal.py             trade log and statistics
   currency.py            INR context and MCX strike guidance
+  expiry.py              option expiry calendar and the DTE gate
   scheduler.py           local APScheduler pipeline
 tests/                   rule engine tests, including the reference week
 docs/twpr_setup_spec.md  source of truth for the rules
@@ -197,9 +203,6 @@ data/                    pipeline output; reference_week.json is the fixture
 
 - Angel One SmartAPI — `monitor.py` prompts for the option premium each minute.
   `read_current_premium()` is the single function to replace.
-- No days-to-expiry guard. MCX CrudeOil options expire 2–4 days before the
-  futures, so a Wednesday can land one or two days from expiry — brutal for a
-  buyer. Needs a spec decision, not just code.
 - EIA weekly series ids in `eia_parser.py` (`WCESTUS1`,
   `W_EPC0_SAX_YCUOK_MBBL`, `WGTSTUS1`, `WDISTUS1`, `WPULEUS3`) need one live run
   to confirm. No longer load-bearing — a scraper covers the week — but the first

@@ -17,6 +17,7 @@ import httpx
 from dotenv import load_dotenv
 
 import currency
+from expiry import days_to_expiry, describe, is_tradeable
 from common import DATA_DIR, env, now_utc, read_json, setup_logging, week_ending, write_json
 from petrocore_client import PetroCoreClient
 from telegram_bot import send_error
@@ -62,6 +63,9 @@ class Signal:
     risks: list[str] = field(default_factory=list)
     reasoning: str = ""
     model_used: str = "rule_based"
+    # Why a skip happened: "deviation" (inside the +/-1.0 zone) or "expiry"
+    # (the near-month option is too close to expiry to trade).
+    skip_reason: str | None = None
 
 
 def generate_signal(
@@ -78,6 +82,7 @@ def generate_signal(
             grade="skip",
             direction="neutral",
             confidence=0,
+            skip_reason="deviation",
             crude_deviation_mb=crude_deviation_mb,
             gasoline_deviation_mb=gasoline_deviation_mb,
             distillate_deviation_mb=distillate_deviation_mb,
@@ -141,9 +146,48 @@ def generate_signal(
     )
 
 
+def apply_expiry_gate(signal: Signal, days: int | None) -> Signal:
+    """Force a skip when the near-month option is too close to expiry.
+
+    Deliberately separate from `generate_signal`, which stays a pure function of
+    the five inventory numbers. This is a tradeability gate on its output, not a
+    sixth rule: the inventory verdict is unchanged and still recorded, the trade
+    is simply not taken with an instrument the exits were not calibrated for.
+
+    An unknown `days` does not gate — see `expiry.is_tradeable`.
+    """
+    if signal.grade == "skip" or is_tradeable(days):
+        return signal
+
+    logger.warning(
+        "Overriding Grade %s %s to skip: only %s day(s) to option expiry",
+        signal.grade, signal.direction, days,
+    )
+    # Keep the inventory read on the record; drop the trade recommendation.
+    signal.grade = "skip"
+    signal.direction = "neutral"
+    signal.confidence = 0
+    signal.skip_reason = "expiry"
+    signal.option_type = None
+    signal.strike_type = None
+    signal.size_pct = None
+    return signal
+
+
 def rule_based_narrative(signal: Signal) -> tuple[list[str], list[str], str]:
     """Deterministic drivers/risks/reasoning — the fallback when no AI is configured."""
     if signal.grade == "skip":
+        if signal.skip_reason == "expiry":
+            return (
+                [
+                    f"Crude deviation {signal.crude_deviation_mb:+.3f} mb would have traded",
+                    "Near-month option is too close to expiry",
+                ],
+                ["Skipped on expiry, not on the data — the inventory signal was tradeable"],
+                "The inventory read was tradeable but the near-month option expires too "
+                "soon: a near-dead option has the wrong gamma and spread for a -40/+50 "
+                "exit structure. No trade.",
+            )
         return (
             [f"Crude deviation {signal.crude_deviation_mb:+.3f} mb is inside the skip zone"],
             [],
@@ -290,15 +334,21 @@ def main() -> int:
         if not api_report:
             logger.warning("No API report found — treating api_crude_mb as 0.0 (contradicts)")
 
-        signal = add_narrative(
-            generate_signal(
-                crude_deviation_mb=crude_deviation,
-                gasoline_deviation_mb=gasoline_deviation,
-                distillate_deviation_mb=distillate_deviation,
-                cushing_mb=eia["cushing_stocks_mb"],
-                api_crude_mb=api_crude,
-            )
+        signal = generate_signal(
+            crude_deviation_mb=crude_deviation,
+            gasoline_deviation_mb=gasoline_deviation,
+            distillate_deviation_mb=distillate_deviation,
+            cushing_mb=eia["cushing_stocks_mb"],
+            api_crude_mb=api_crude,
         )
+
+        # Tradeability gate: the inventory verdict stands, but a near-dead option
+        # is not the instrument the -40/+50/+100 exits were calibrated for.
+        option_expiry, dte = days_to_expiry()
+        logger.info("%s", describe(option_expiry, dte))
+        signal = apply_expiry_gate(signal, dte)
+
+        signal = add_narrative(signal)
 
         # MCX is quoted in INR, the signal is derived from USD WTI. This records
         # what the rupee is doing and turns it into strike guidance. It never
@@ -307,6 +357,8 @@ def main() -> int:
         currency_block = currency.context(market, signal.direction, signal.option_type)
         if signal.grade != "skip":
             signal.risks.extend(currency.risk_notes(currency_block, signal.direction))
+        if dte is None:
+            signal.risks.append(describe(option_expiry, dte))
 
         week = eia.get("week_ending") or week_ending()
         payload = {
@@ -315,6 +367,8 @@ def main() -> int:
             "trade_type": env("TWPR_TRADE_TYPE", "paper"),
             **asdict(signal),
             **currency_block,
+            "option_expiry": option_expiry.isoformat() if option_expiry else None,
+            "days_to_expiry": dte,
             "generated_at": now_utc().isoformat(),
         }
         write_json(SIGNAL_FILE, payload)

@@ -208,10 +208,49 @@ settle into — observed 2026-09-27:
 | 2026-11-17 | 2026-11-19 | 2 days |
 | 2026-12-16 | 2026-12-18 | 2 days |
 
-So "near month" is two different dates. On a Wednesday close to option expiry the
-near-month option may have only a day or two of life left, which for an options
-**buyer** means theta and a collapsing bid well beyond the usual post-release IV
-crush. Nothing in the engine checks this yet — see the open items.
+So "near month" is two different dates, and a Wednesday can land one or two days
+from option expiry while the futures contract still looks like near month. The
+days-to-expiry gate below handles it.
+
+## Step 0 — days-to-expiry gate
+
+Applied to the rule engine's output, **before** the narrative. It is a
+tradeability gate, not a sixth rule: `generate_signal()` remains a pure function
+of the five inventory numbers, and the inventory verdict is still recorded when
+the gate fires.
+
+```python
+if days_to_expiry < MIN_DAYS_TO_EXPIRY:   # 3 calendar days
+    grade, direction, confidence = 'skip', 'neutral', 0
+    skip_reason = 'expiry'
+    option_type = strike_type = size_pct = None
+```
+
+The floor is **inclusive**: exactly 3 days still trades, 2 does not.
+
+Why skip rather than roll to the next expiry: the −40% / +50% / +100% exits are
+calibrated to a gamma regime a near-dead option is not in. A ₹20 premium falling
+to ₹12 is −40% on a trivial MCX move, so the stop fires on noise, and the bid-ask
+on an expiring option can cost more than the stop. Rolling to the next month
+solves the gamma problem by making +50% in a 2.5-hour hold very unlikely — a
+different, worse trade wearing the same clothes. Skipping is already this
+system's native response to a bad setup.
+
+Cost: roughly **7 of 52 Wednesdays** (13%), since MCX crude options expire
+monthly around the 15th–17th.
+
+**An unknown number does not gate.** A missing or stale expiry calendar is an
+infrastructure problem, and failing closed would silently cancel a week over a
+cache miss. The signal proceeds, `describe()` adds a risk note telling you to
+check the chain yourself, and the alert says `Expiry: unknown`.
+
+### Where the calendar comes from
+
+Zerodha's public instrument master, cached in `data/expiries.json`.
+`market_data.py` refreshes it on the daily 09:00 run so the Wednesday signal path
+reads a file; a signal-time cache miss falls back to one fetch. `skip_reason`
+distinguishes an expiry skip from a deviation skip in `signal.json`, the alert and
+the journal.
 
 Missing or stale `market_data.json` leaves every field null and adds the risk
 line "No USD/INR data — strike guidance is unverified". It never blocks a signal.
@@ -281,11 +320,6 @@ back to `rule_based` and the signal still ships.
 
 ## Open items
 
-- **No days-to-expiry guard.** The setup buys the near-month option without
-  checking how long it has left. Options expire 2–4 days before the futures, so a
-  Wednesday can land one or two days from expiry. Worth a rule — skip, or roll to
-  the next expiry, below some threshold — but it is a spec decision, not a code
-  tweak.
 
 - **Scraped weeks carry no `refinery_util_pct`.** Recorded only; no rule reads
   it. A week sourced from a scraper has it null.
