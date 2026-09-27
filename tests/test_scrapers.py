@@ -259,3 +259,67 @@ def test_sources_agree_on_actuals(monkeypatch):
     assert te.fetch_api_report("2026-09-18")["api_crude_mb"] == inv.fetch_api_crude_only(
         "2026-09-18"
     )
+
+
+# --- EIA actuals (the eia_parser fallback) --------------------------------
+
+EIA_ACTUAL_FIELDS = (
+    "crude_change_mb",
+    "cushing_stocks_mb",
+    "gasoline_change_mb",
+    "distillate_change_mb",
+)
+
+
+def test_te_eia_actuals_for_a_released_week(monkeypatch):
+    """One fixture serves every slug, so all four legs read crude's numbers."""
+    monkeypatch.setattr(te, "_fetch", lambda slug: TE_CRUDE_HTML)
+    result = te.fetch_eia_actuals("2026-09-18")
+    assert all(result[f] == 2.969 for f in EIA_ACTUAL_FIELDS)
+    # Trading Economics has refinery runs in barrels, not the utilization percent.
+    assert result["refinery_util_pct"] is None
+
+
+def test_te_eia_actuals_none_before_release(monkeypatch):
+    monkeypatch.setattr(te, "_fetch", lambda slug: TE_CRUDE_HTML)
+    assert te.fetch_eia_actuals("2026-09-25") is None
+
+
+def test_te_eia_actuals_none_for_an_unknown_week(monkeypatch):
+    monkeypatch.setattr(te, "_fetch", lambda slug: TE_CRUDE_HTML)
+    assert te.fetch_eia_actuals("2025-01-03") is None
+
+
+def test_investing_eia_actuals_for_a_released_week(monkeypatch):
+    monkeypatch.setattr(
+        inv, "_calendar_rows", lambda *_: inv._parse_service_html(INVESTING_HTML)
+    )
+    assert inv.fetch_eia_actuals("2026-09-18") == {
+        "crude_change_mb": 2.969,
+        "cushing_stocks_mb": 2.266,
+        "gasoline_change_mb": -1.686,
+        "distillate_change_mb": -0.428,
+        "refinery_util_pct": None,
+    }
+
+
+def test_investing_eia_actuals_none_for_an_unlisted_week(monkeypatch):
+    monkeypatch.setattr(
+        inv, "_calendar_rows", lambda *_: inv._parse_service_html(INVESTING_HTML)
+    )
+    assert inv.fetch_eia_actuals("2026-09-25") is None
+
+
+def test_investing_distinguishes_crude_from_cushing(monkeypatch):
+    """The substring trap, on the path that matters most.
+
+    "Crude Oil Inventories" is inside "Cushing Crude Oil Inventories". Matching
+    loosely would put Cushing's number in crude_change_mb and drive the grade
+    off the wrong figure entirely.
+    """
+    monkeypatch.setattr(
+        inv, "_calendar_rows", lambda *_: inv._parse_service_html(INVESTING_HTML)
+    )
+    result = inv.fetch_eia_actuals("2026-09-18")
+    assert result["crude_change_mb"] == 2.969
+    assert result["cushing_stocks_mb"] == 2.266

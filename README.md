@@ -28,19 +28,20 @@ Wed      20:05  monitor.py             exit monitor, hard close 22:30 IST
 | `signal_engine.py` | done | 31 tests green; reference week end-to-end on fixtures |
 | `petrocore_client.py` | done | 10s timeout, 2×2s retry on 5xx, never raises; skip path exercised |
 | `market_data.py` | done | live yfinance fetch; derived columns checked against the spec example |
-| `eia_parser.py` | needs a live run | polling and change maths done; series ids unconfirmed (no API key yet) |
+| `eia_parser.py` | done | scraper fallback live-verified; API series ids still unconfirmed (no key yet) |
 | `telegram_bot.py` | done | all five message shapes rendered (signal, skip, stop, target, hard close) |
 | `monitor.py` | done | exit conditions incl. partial T1 then hard close on a 4-lot position |
 | `journal.py` | done | P&L and charges unit-tested; stats and empty-journal case rendered |
 | `scheduler.py` | done | `--next` prints the correct IST cron times |
 | `consensus_fetcher.py` | done | live scrape from both sources; fallback chain tested |
 | `api_monitor.py` | done | live scrape from Trading Economics |
-| `tradingeconomics_scraper.py` | done | plain HTTP; live consensus + API report |
-| `investing_scraper.py` | done | headless Chromium; live consensus |
+| `tradingeconomics_scraper.py` | done | plain HTTP; live consensus, API report and EIA actuals |
+| `investing_scraper.py` | done | headless Chromium; live consensus and EIA actuals |
 | GitHub Actions | done | 4 workflows, YAML validated |
 
-Not yet proven: a full live Wednesday. Everything above the EIA row runs on real
-data; the EIA leg has only been exercised against fixtures.
+Not yet proven: a full live Wednesday. Every input can now be sourced without an
+API key — a complete pipeline for week ending 2026-09-18 ran entirely from
+scraped data and produced Grade A bearish at confidence 85 (deviation +3.569 mb).
 
 ## Setup
 
@@ -52,7 +53,7 @@ python -m pytest tests/ -q
 
 | Variable | Needed? | Notes |
 | -------- | ------- | ----- |
-| `EIA_API_KEY` | yes | free at [eia.gov/opendata](https://www.eia.gov/opendata/) |
+| `EIA_API_KEY` | no | free at [eia.gov/opendata](https://www.eia.gov/opendata/); without it `eia_parser.py` scrapes instead and `refinery_util_pct` is null |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | yes | without them alerts are logged, not sent |
 | `MODEL_MODE` | no | `groq` \| `ollama` \| `rule_based` (default) |
 | `GROQ_API_KEY`, `GROQ_MODEL` | no | only for `MODEL_MODE=groq` |
@@ -178,6 +179,9 @@ data/                    pipeline output; reference_week.json is the fixture
   `read_current_premium()` is the single function to replace.
 - EIA weekly series ids in `eia_parser.py` (`WCESTUS1`,
   `W_EPC0_SAX_YCUOK_MBBL`, `WGTSTUS1`, `WDISTUS1`, `WPULEUS3`) need one live run
-  to confirm. First suspect if a Wednesday run returns no rows.
+  to confirm. No longer load-bearing — a scraper covers the week — but the first
+  suspect if the API path logs no rows.
+- PetroCore's `eia-report` endpoint rejects a scraped `source` with a 422 until
+  its enum accepts `tradingeconomics.com` / `investing.com`.
 - MCX close in `market_data.py` is `wti_close × usd_inr_close` — an
   approximation, not exchange settlement.

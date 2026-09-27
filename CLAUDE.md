@@ -99,7 +99,10 @@ Two boundary details that are easy to get backwards:
   works because they all live in `app/` and are run from there. Tests add
   `app/` to `sys.path`.
 - `setup_logging()` also forces stdout/stderr to UTF-8 — alerts carry `₹` and
-  emoji, and a cp1252 Windows console raises `UnicodeEncodeError` without it.
+  emoji, and a cp1252 Windows console raises `UnicodeEncodeError` without it. It
+  also silences `httpx`/`httpcore` to WARNING: httpx logs every request URL at
+  INFO, and the Telegram Bot API carries the bot token in its path, so leaving it
+  on writes the token into every log including GitHub Actions run logs.
 - All stock figures are **million barrels**, negative = draw. The EIA API returns
   thousand barrels, so `eia_parser.py` divides by 1000 at the boundary.
 - Timezones: `now_utc()` for stored timestamps, `now_ist()` for anything
@@ -116,8 +119,9 @@ Two boundary details that are easy to get backwards:
 
 ### Consensus sources
 
-Both scrapers exist and are tried in this order by `consensus_fetcher.py` and
-`api_monitor.py`, after explicit CLI flags and before the terminal prompt:
+Both scrapers exist and are tried in this order by `consensus_fetcher.py`,
+`api_monitor.py` and `eia_parser.py`, after the explicit source each script
+prefers (CLI flags, or the EIA API) and before the terminal prompt:
 
 1. `tradingeconomics_scraper` — plain HTTP, ~1s. The calendar tables are in the
    served HTML. This is the primary.
@@ -141,6 +145,14 @@ Two traps the parsers exist to avoid:
   the latest released one — otherwise the Cushing, gasoline and distillate legs
   silently come from a different week than crude.
 
+`eia_parser.py` keeps the EIA API first when `EIA_API_KEY` is set — it is the
+publisher — and falls back to the scrapers otherwise, so a Wednesday can run
+without a key. The API derives stock *changes* from two weekly levels in
+thousand barrels; the scrapers publish the changes directly in million barrels.
+Neither scraper carries the refinery utilization percentage, so
+`refinery_util_pct` is null on a scraped week. Nothing in the signal engine reads
+it, which is why it is not in `eia_parser.REQUIRED_FIELDS`.
+
 `investing_scraper.fetch_api_report()` always returns `None`: the US calendar
 carries only the crude leg of the API report, so it cannot fill the four fields
 `api_monitor` requires. Trading Economics is the only source for that report.
@@ -163,10 +175,16 @@ JSON is how Wednesday's signal sees Tuesday's consensus. `data/active_trade.json
 
 ## Not wired up
 
-- Angel One SmartAPI (below) and one live EIA key run. The consensus scrapers
-  are built — see **Consensus sources**.
 - Angel One SmartAPI. `monitor.py:read_current_premium` prompts for the premium
   each minute; that function is the single seam to replace.
 - The EIA weekly series ids in `eia_parser.py` need one live run with a real
-  `EIA_API_KEY` to confirm. They are the first suspect if a Wednesday run
-  returns no rows.
+  `EIA_API_KEY` to confirm. They are no longer load-bearing — a scraper covers
+  the week if the API returns nothing — but they are the first suspect if the API
+  path logs no rows.
+- PetroCore's `/api/v1/twpr/eia-report` constrains `source` to
+  `eia_api`, `tankertrackers+eia_api` or `wbos`, so a scraped week is rejected
+  with a 422. The POST is non-blocking and the JSON file still holds the week, but
+  PetroCore will have no EIA row for it until that enum accepts
+  `tradingeconomics.com` and `investing.com`. The other endpoints take free-form
+  sources. Do not paper over this by sending `eia_api` for scraped data —
+  provenance in the audit trail matters more than a green POST.

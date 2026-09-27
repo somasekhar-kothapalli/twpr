@@ -215,6 +215,48 @@ def fetch_consensus(week: str | None = None) -> dict | None:
     return values
 
 
+def fetch_eia_actuals(week: str | None = None) -> dict | None:
+    """The EIA WPSR actuals for the week ending `week` (default: this week's).
+
+    A fallback for `eia_parser.py` when no `EIA_API_KEY` is available. Returns
+    None until every leg is published.
+
+    `refinery_util_pct` is always None: Trading Economics carries refinery crude
+    runs in barrels, not the utilization percentage, and nothing in the signal
+    engine reads that field.
+    """
+    target = date.fromisoformat(week or week_ending())
+    changes: dict[str, float] = {}
+
+    for name, slug in EIA_SLUGS.items():
+        rows = _calendar_rows(_fetch(slug))
+        row = _row_for_week(rows, target)
+        if row is None:
+            logger.warning(
+                "tradingeconomics: no EIA %s row for week ending %s (saw %s)",
+                name, target, [r["reference"] for r in rows],
+            )
+            return None
+        if row["actual"] is None:
+            logger.info("tradingeconomics: EIA %s for %s not released yet", name, target)
+            return None
+        changes[name] = row["actual"]
+
+    logger.info(
+        "tradingeconomics EIA %s: crude %+.3f | Cushing %+.3f | gasoline %+.3f | "
+        "distillate %+.3f",
+        target, changes["crude"], changes["cushing"],
+        changes["gasoline"], changes["distillate"],
+    )
+    return {
+        "crude_change_mb": changes["crude"],
+        "cushing_stocks_mb": changes["cushing"],
+        "gasoline_change_mb": changes["gasoline"],
+        "distillate_change_mb": changes["distillate"],
+        "refinery_util_pct": None,
+    }
+
+
 def fetch_api_report(week: str | None = None) -> dict | None:
     """The API private inventory report for the week ending `week`.
 

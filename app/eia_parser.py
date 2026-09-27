@@ -1,8 +1,17 @@
 """Fetch the EIA Weekly Petroleum Status Report actuals and save the week's changes.
 
 Runs Wednesday 20:00 IST and polls until the new week appears (EIA publishes at
-10:30 ET). Stock *changes* are derived as this week minus last week, converted
-from thousand barrels to million barrels.
+10:30 ET).
+
+Source order, tried on every poll:
+  1. the EIA API v2, when EIA_API_KEY is set — the publisher, so it wins
+  2. tradingeconomics_scraper.fetch_eia_actuals()
+  3. investing_scraper.fetch_eia_actuals()
+
+From the API, stock *changes* are derived as this week minus last week and
+converted from thousand barrels to million barrels. The scrapers publish the
+changes directly, already in million barrels, but carry no refinery utilization
+percentage, so that field is null when a scraper supplies the week.
 """
 
 from __future__ import annotations
@@ -12,6 +21,7 @@ import logging
 import os
 import sys
 import time
+from inspect import signature
 from datetime import timedelta
 
 import httpx
@@ -39,6 +49,15 @@ STOCK_SERIES = {
     "distillate": "WDISTUS1",  # U.S. ending stocks of distillate fuel oil
 }
 REFINERY_SERIES = "WPULEUS3"  # Percent utilization of refinery operable capacity
+
+# What the signal engine actually reads. refinery_util_pct is recorded only, and
+# the scrapers cannot supply it, so it is deliberately not required here.
+REQUIRED_FIELDS = (
+    "crude_change_mb",
+    "cushing_stocks_mb",
+    "gasoline_change_mb",
+    "distillate_change_mb",
+)
 
 POLL_INTERVAL_SECONDS = 60
 POLL_TIMEOUT_SECONDS = 90 * 60
@@ -119,8 +138,69 @@ def fetch_eia_report(api_key: str, expected_week: str | None = None) -> dict | N
     }
 
 
+def _from_scraper(module_name: str, week: str) -> dict | None:
+    """Try `module_name.fetch_eia_actuals(week)`. None when absent or failing."""
+    try:
+        module = __import__(module_name)
+    except ImportError:
+        logger.info("%s.py not present — skipping", module_name)
+        return None
+
+    fetcher = getattr(module, "fetch_eia_actuals", None)
+    if fetcher is None:
+        logger.warning("%s.py has no fetch_eia_actuals() — skipping", module_name)
+        return None
+
+    try:
+        data = fetcher(week) if signature(fetcher).parameters else fetcher()
+    except Exception as exc:  # noqa: BLE001 — a broken scraper must not kill the run
+        logger.error("%s.fetch_eia_actuals() failed: %s", module_name, exc)
+        return None
+
+    if not data:
+        return None
+
+    missing = [f for f in REQUIRED_FIELDS if data.get(f) is None]
+    if missing:
+        logger.error("%s.fetch_eia_actuals() omitted %s — discarding", module_name, missing)
+        return None
+
+    return {
+        "week_ending": week,
+        "report_date": now_utc().date().isoformat(),
+        **{f: data[f] for f in REQUIRED_FIELDS},
+        "refinery_util_pct": data.get("refinery_util_pct"),
+        "source": module_name.replace("_scraper", ".com"),
+        "released_at": now_utc().isoformat(),
+    }
+
+
+def fetch_actuals(week: str, api_key: str | None) -> dict | None:
+    """One attempt across every available source, in order of authority.
+
+    The EIA API is the publisher, so it wins when a key is configured. The
+    scrapers are a fallback that lets the Wednesday pipeline run without one.
+    """
+    if api_key:
+        try:
+            report = fetch_eia_report(api_key, week)
+            if report is not None:
+                return report
+        except Exception as exc:  # noqa: BLE001 — fall through to the scrapers
+            logger.error("EIA API attempt failed: %s", exc)
+    else:
+        logger.info("EIA_API_KEY not set — using the scrapers (refinery_util_pct will be null)")
+
+    for module_name in ("tradingeconomics_scraper", "investing_scraper"):
+        report = _from_scraper(module_name, week)
+        if report is not None:
+            return report
+
+    return None
+
+
 def main() -> int:
-    """Poll the EIA API until this week's WPSR lands, then save and publish it."""
+    """Poll until this week's WPSR lands, then save and publish it."""
     setup_logging()
     parser = argparse.ArgumentParser(description="TWPR EIA WPSR parser")
     parser.add_argument("--once", action="store_true", help="single attempt, no polling")
@@ -129,8 +209,6 @@ def main() -> int:
 
     try:
         api_key = os.getenv("EIA_API_KEY")
-        if not api_key:
-            raise RuntimeError("EIA_API_KEY not set — get a free key at eia.gov/opendata")
 
         expected_week = args.week or week_ending()
         existing = read_json(EIA_ACTUAL_FILE) or {}
@@ -140,7 +218,7 @@ def main() -> int:
 
         deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
         while True:
-            report = fetch_eia_report(api_key, expected_week)
+            report = fetch_actuals(expected_week, api_key)
             if report is not None:
                 break
             if args.once or time.monotonic() >= deadline:

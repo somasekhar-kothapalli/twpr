@@ -40,8 +40,8 @@ Nothing below needs a full `.env`. What each key unlocks:
 | Key | Without it |
 | --- | ---------- |
 | *(none)* | rule engine, journal, monitor, scrapers, scheduler all work |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | alerts are logged to the terminal instead of sent |
-| `EIA_API_KEY` | `eia_parser.py` cannot run; `market_data.py` leaves M1/M2 null |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | alerts are logged to the terminal instead of sent. **With them set, every test below really messages your phone** — unset them for a quiet run |
+| `EIA_API_KEY` | `eia_parser.py` scrapes instead (no `refinery_util_pct`); `market_data.py` leaves M1/M2 null |
 | `PETROCORE_URL`, `PETROCORE_API_KEY` | POSTs are skipped with a warning |
 | `GROQ_API_KEY` | narrative falls back to `rule_based` |
 
@@ -64,7 +64,7 @@ use `2026-09-18`; substitute a released week when you read this.
 python -m pytest tests/ -q
 ```
 
-Expect `75 passed`. These are all offline. If this fails, stop here — nothing
+Expect `93 passed`. These are all offline. If this fails, stop here — nothing
 below will be meaningful.
 
 Run just the reference week, the one test that must never go red:
@@ -202,7 +202,40 @@ python app/consensus_fetcher.py --week 2026-09-04
 
 ## 4. EIA actuals
 
-Needs `EIA_API_KEY`. One attempt instead of polling for 90 minutes:
+Three sources, tried in order on every poll: the EIA API when `EIA_API_KEY` is
+set, then Trading Economics, then investing.com.
+
+**No key needed** — the scrapers cover it:
+
+```bash
+EIA_API_KEY= python app/eia_parser.py --once --week 2026-09-18
+cat data/eia_actual.json
+```
+
+**What to check.** `source` reads `tradingeconomics.com` (or `investing.com`),
+and `refinery_util_pct` is `null` — neither site carries the utilization
+percentage, and no rule reads it. The four stock changes must all be present; a
+partial scrape is discarded rather than written.
+
+Both scrapers directly, to confirm they agree:
+
+```bash
+python - <<'EOF'
+import sys; sys.path.insert(0,'app')
+from common import setup_logging; setup_logging()
+import tradingeconomics_scraper as te, investing_scraper as inv
+W = "2026-09-18"
+print("TE       :", te.fetch_eia_actuals(W))
+print("investing:", inv.fetch_eia_actuals(W))
+EOF
+```
+
+**What to check.** Identical numbers. These are published facts, not forecasts —
+unlike the consensus, they must not differ.
+
+### With a key
+
+One attempt instead of polling for 90 minutes:
 
 ```bash
 python app/eia_parser.py --once --week 2026-09-18
@@ -246,6 +279,27 @@ EOF
 ---
 
 ## 5. Full Wednesday pipeline
+
+### Entirely from scrapers, no API key
+
+The shortest end-to-end proof, on a real past week:
+
+```bash
+export EIA_API_KEY=
+python app/consensus_fetcher.py --no-prompt --week 2026-09-18
+python app/api_monitor.py --once --no-prompt --week 2026-09-18
+python app/eia_parser.py --once --week 2026-09-18
+python app/signal_engine.py
+```
+
+**What to check.** `Grade A bearish | confidence 85 | deviation +3.569 mb`
+(EIA +2.969 − consensus −0.600). Verify the arithmetic yourself:
+
+```bash
+python -c "import json;c=json.load(open('data/consensus.json'));e=json.load(open('data/eia_actual.json'));print(f\"{e['crude_change_mb']:+.3f} - {c['crude_consensus_mb']:+.3f} = {e['crude_change_mb']-c['crude_consensus_mb']:+.3f} mb\")"
+```
+
+### With the reference week
 
 Chain the steps the way the Wednesday workflow does. This uses the reference
 week so you know the answer in advance.

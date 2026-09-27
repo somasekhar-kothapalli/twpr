@@ -30,6 +30,13 @@ def setup_logging() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    # httpx logs every request at INFO with the full URL. The Telegram Bot API
+    # carries the bot token in its path, so that would write the token into any
+    # log — including a GitHub Actions run log. Our own POST logging in
+    # petrocore_client covers what we actually need to see.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 
 def now_utc() -> datetime:
     """Current time, UTC-aware."""

@@ -199,6 +199,8 @@ back to `rule_based` and the signal still ships.
 
 ## Open items
 
+- **Scraped weeks carry no `refinery_util_pct`.** Recorded only; no rule reads
+  it. A week sourced from a scraper has it null.
 - **EIA series ids** in `app/eia_parser.py` (`WCESTUS1`,
   `W_EPC0_SAX_YCUOK_MBBL`, `WGTSTUS1`, `WDISTUS1`, `WPULEUS3`) need one live run
   against a real `EIA_API_KEY` to confirm. They are the first thing to check if
