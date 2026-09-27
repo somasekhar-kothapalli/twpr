@@ -29,6 +29,26 @@ crash — but it leaves you with one consensus source instead of two:
 .venv/Scripts/python.exe -m playwright install chromium
 ```
 
+**Keep comments in `.env` on their own line.** `python-dotenv` keeps an inline
+`# ...` as the value when the value is empty, so this sets the key to the comment
+text and the EIA API answers 403 as if the key were bad:
+
+```bash
+EIA_API_KEY=        # free at eia.gov/opendata   <-- WRONG, key becomes "# free at ..."
+```
+
+`common.env()` now treats a `#`-leading value as unset, so the pipeline falls back
+cleanly instead of sending garbage. Check what your `.env` actually yields:
+
+```bash
+python - <<'EOF'
+from dotenv import dotenv_values
+for k, v in dotenv_values(".env").items():
+    state = "unset" if not v else ("LEAKED COMMENT" if v.lstrip().startswith("#") else f"set/{len(v)}")
+    print(f"  {k:22} {state}")
+EOF
+```
+
 Confirm you are running the interpreter you think you are:
 
 ```bash
@@ -64,7 +84,7 @@ use `2026-09-18`; substitute a released week when you read this.
 python -m pytest tests/ -q
 ```
 
-Expect `93 passed`. These are all offline. If this fails, stop here — nothing
+Expect `110 passed`. These are all offline. If this fails, stop here — nothing
 below will be meaningful.
 
 Run just the reference week, the one test that must never go red:

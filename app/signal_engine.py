@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, field
 import httpx
 from dotenv import load_dotenv
 
-from common import DATA_DIR, now_utc, read_json, setup_logging, week_ending, write_json
+from common import DATA_DIR, env, now_utc, read_json, setup_logging, week_ending, write_json
 from petrocore_client import PetroCoreClient
 from telegram_bot import send_error
 
@@ -194,8 +194,11 @@ def _ai_narrative(signal: Signal, mode: str) -> tuple[list[str], list[str], str]
         if mode == "groq":
             from groq import Groq
 
-            model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-            completion = Groq(api_key=os.environ["GROQ_API_KEY"]).chat.completions.create(
+            model = env("GROQ_MODEL", "llama-3.3-70b-versatile")
+            api_key = env("GROQ_API_KEY")
+            if not api_key:
+                raise RuntimeError("MODEL_MODE=groq but GROQ_API_KEY is not set")
+            completion = Groq(api_key=api_key).chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
@@ -203,9 +206,9 @@ def _ai_narrative(signal: Signal, mode: str) -> tuple[list[str], list[str], str]
             )
             content = completion.choices[0].message.content
         elif mode == "ollama":
-            model = os.getenv("OLLAMA_MODEL", "llama3.1")
+            model = env("OLLAMA_MODEL", "llama3.1")
             response = httpx.post(
-                f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/generate",
+                f"{env('OLLAMA_URL', 'http://localhost:11434')}/api/generate",
                 json={"model": model, "prompt": prompt, "stream": False, "format": "json"},
                 timeout=60.0,
             )
@@ -227,7 +230,7 @@ def _ai_narrative(signal: Signal, mode: str) -> tuple[list[str], list[str], str]
 
 def add_narrative(signal: Signal) -> Signal:
     """Attach drivers/risks/reasoning, using MODEL_MODE with a rule-based fallback."""
-    mode = os.getenv("MODEL_MODE", "rule_based").lower()
+    mode = (env("MODEL_MODE", "rule_based") or "rule_based").lower()
     result = _ai_narrative(signal, mode) if mode in ("groq", "ollama") else None
 
     if result is None:
@@ -235,7 +238,7 @@ def add_narrative(signal: Signal) -> Signal:
         signal.model_used = "rule_based"
     else:
         signal.key_drivers, signal.risks, signal.reasoning = result
-        signal.model_used = os.getenv("GROQ_MODEL", mode) if mode == "groq" else mode
+        signal.model_used = (env("GROQ_MODEL", mode) if mode == "groq" else mode)
 
     return signal
 
@@ -299,7 +302,7 @@ def main() -> int:
         payload = {
             "week_ending": week,
             "setup": "TWPR",
-            "trade_type": os.getenv("TWPR_TRADE_TYPE", "paper"),
+            "trade_type": env("TWPR_TRADE_TYPE", "paper"),
             **asdict(signal),
             "generated_at": now_utc().isoformat(),
         }

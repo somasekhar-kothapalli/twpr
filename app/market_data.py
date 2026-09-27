@@ -17,7 +17,7 @@ import pandas as pd
 import yfinance as yf
 from dotenv import load_dotenv
 
-from common import DATA_DIR, now_utc, setup_logging, write_json
+from common import DATA_DIR, env, now_utc, setup_logging, write_json
 from petrocore_client import PetroCoreClient
 from telegram_bot import send_error
 
@@ -133,7 +133,7 @@ def build_rows(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
     """Merge yfinance and EIA data on date and derive the calculated columns."""
     closes = fetch_yfinance(lookback_days)
 
-    api_key = os.getenv("EIA_API_KEY")
+    api_key = env("EIA_API_KEY")
     if api_key:
         start = (now_utc().date() - timedelta(days=lookback_days * 3)).isoformat()
         try:

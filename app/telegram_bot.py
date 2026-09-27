@@ -16,7 +16,7 @@ import traceback
 import httpx
 from dotenv import load_dotenv
 
-from common import DATA_DIR, now_ist, read_json, setup_logging
+from common import DATA_DIR, env, now_ist, read_json, setup_logging
 
 load_dotenv()
 
@@ -28,8 +28,8 @@ TIMEOUT_SECONDS = 10.0
 
 def send_message(text: str) -> bool:
     """Send a plain-text Telegram message. Returns False on any failure."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    token = env("TELEGRAM_BOT_TOKEN")
+    chat_id = env("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         logger.warning("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set — message not sent")
         logger.info("Telegram message (unsent):\n%s", text)

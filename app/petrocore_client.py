@@ -15,6 +15,8 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 
+from common import env
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -28,8 +30,8 @@ class PetroCoreClient:
     """POSTs TWPR payloads to PetroCore. Never raises — failures are logged."""
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None) -> None:
-        self.base_url = (base_url or os.getenv("PETROCORE_URL") or "").rstrip("/")
-        self.api_key = api_key or os.getenv("PETROCORE_API_KEY", "")
+        self.base_url = (base_url or env("PETROCORE_URL") or "").rstrip("/")
+        self.api_key = api_key or env("PETROCORE_API_KEY", "") or ""
         self.enabled = bool(self.base_url)
         if not self.enabled:
             logger.warning("PETROCORE_URL not set — PetroCore POSTs will be skipped")

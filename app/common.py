@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -57,6 +58,27 @@ def week_ending(reference: date | None = None) -> str:
     # Monday=0 ... Friday=4. Step back to the latest Friday on or before `day`.
     offset = (day.weekday() - 4) % 7
     return (day - timedelta(days=offset)).isoformat()
+
+
+def env(name: str, default: str | None = None) -> str | None:
+    """Read an environment variable, treating a placeholder as unset.
+
+    `python-dotenv` keeps an inline `# ...` comment as the value when the value
+    itself is empty, so a `.env` line like
+
+        EIA_API_KEY=        # free at eia.gov/opendata
+
+    silently sets the key to the comment text. Sending that to an API gets a 403
+    that looks like a bad key rather than a bad config, so treat anything blank
+    or starting with `#` as absent.
+    """
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    if not value or value.startswith("#"):
+        return default
+    return value
 
 
 def read_json(path: Path, default: Any = None) -> Any:

@@ -47,9 +47,15 @@ scraped data and produced Grade A bearish at confidence 85 (deviation +3.569 mb)
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env    # then fill in the keys
+python -m playwright install chromium    # for the investing.com fallback
+cp .env.example .env                     # then fill in the keys
 python -m pytest tests/ -q
 ```
+
+Keep any comment in `.env` on its own line — `python-dotenv` keeps an inline
+`# ...` as the value when the value is empty. `common.env()` treats such a value
+as unset so nothing sends it to an API, but the variable is then simply not
+configured.
 
 | Variable | Needed? | Notes |
 | -------- | ------- | ----- |

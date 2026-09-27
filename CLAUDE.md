@@ -91,7 +91,7 @@ Two boundary details that are easy to get backwards:
 
 ### Conventions
 
-- Shared helpers live in `app/common.py` (`DATA_DIR`, `setup_logging`,
+- Shared helpers live in `app/common.py` (`DATA_DIR`, `setup_logging`, `env`,
   `now_utc`, `now_ist`, `week_ending`, `read_json`, `write_json`). Telegram
   sending lives in `telegram_bot.py` (`send_message`, `send_error`) — other
   scripts import from there rather than talking to the Bot API.
@@ -107,6 +107,12 @@ Two boundary details that are easy to get backwards:
   thousand barrels, so `eia_parser.py` divides by 1000 at the boundary.
 - Timezones: `now_utc()` for stored timestamps, `now_ist()` for anything
   schedule- or session-related. Never a naive datetime.
+- **Read every environment variable through `common.env()`, never `os.getenv`.**
+  `python-dotenv` keeps an inline `# ...` comment as the value when the value is
+  empty, so `EIA_API_KEY=   # free at eia.gov/opendata` sets the key to the
+  comment text. `env()` treats blank and `#`-leading values as unset, which turns
+  a confusing downstream 403 into a clean "not set, falling back". A `#` inside a
+  value is kept — only a leading one marks a placeholder.
 - `week_ending()` returns the Friday the EIA report covers — the previous Friday
   from a Tuesday or Wednesday run, which is what every script wants.
 - **`signal_engine.main()` refuses to mix weeks.** The EIA release defines the

@@ -27,7 +27,7 @@ from datetime import timedelta
 import httpx
 from dotenv import load_dotenv
 
-from common import DATA_DIR, now_utc, read_json, setup_logging, week_ending, write_json
+from common import DATA_DIR, env, now_utc, read_json, setup_logging, week_ending, write_json
 from petrocore_client import PetroCoreClient
 from telegram_bot import send_error
 
@@ -208,7 +208,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        api_key = os.getenv("EIA_API_KEY")
+        api_key = env("EIA_API_KEY")
 
         expected_week = args.week or week_ending()
         existing = read_json(EIA_ACTUAL_FILE) or {}
