@@ -18,6 +18,7 @@ import yfinance as yf
 from dotenv import load_dotenv
 
 from common import DATA_DIR, env, now_utc, setup_logging, write_json
+from currency import classify, trend_pct
 from petrocore_client import PetroCoreClient
 from telegram_bot import send_error
 
@@ -167,6 +168,13 @@ def main() -> int:
             raise RuntimeError("no market data rows produced")
 
         latest = rows[-1]
+        # Only the latest row is saved, so carry the trends across the window with
+        # it — signal_engine reads this file for currency context and would
+        # otherwise have a single day and no sense of direction.
+        latest["usd_inr_trend_pct"] = trend_pct([r.get("usd_inr_close") for r in rows])
+        latest["wti_trend_pct"] = trend_pct([r.get("wti_close") for r in rows])
+        latest["trend_sessions"] = len(rows)
+
         write_json(MARKET_DATA_FILE, latest)
         logger.info(
             "Market data %s: WTI %s | Brent %s | USDINR %s | MCX~%s | crack321 %s",
@@ -176,6 +184,13 @@ def main() -> int:
             latest.get("usd_inr_close"),
             latest.get("mcx_close"),
             latest.get("crack_321"),
+        )
+        logger.info(
+            "Trends over %d sessions: WTI %+.2f%% | USDINR %+.2f%% (%s)",
+            latest["trend_sessions"],
+            latest["wti_trend_pct"] or 0.0,
+            latest["usd_inr_trend_pct"] or 0.0,
+            classify(latest["usd_inr_trend_pct"]),
         )
 
         client = PetroCoreClient()

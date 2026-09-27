@@ -119,6 +119,18 @@ Exits, enforced by `monitor.py` every 60s: stop at −40%, target 1 at +50%
 (half off, once), target 2 at +100%, hard close 22:30 IST. Stop is checked
 before the hard close.
 
+### Currency context
+
+MCX is quoted in INR, WTI in USD, so `MCX ≈ WTI × USD/INR`. The signal carries
+`usd_inr_trend_pct`, `currency_direction`, `currency_effect`,
+`mcx_implied_level` and the `strike_atm` / `strike_1_otm` guidance, plus risk
+notes when the rupee moves against the trade.
+
+It does **not** move grade, direction or confidence. Onshore USD/INR trades
+09:00–17:00 IST while TWPR holds 20:00–22:30 IST, so FX is shut for the whole
+trade; over six months the rupee flipped the sign of the MCX move versus WTI on
+3.2% of days. It decides which strike is at the money, not which way to bet.
+
 ## Journal
 
 ```bash
@@ -158,6 +170,7 @@ app/
   signal_engine.py       the 5-step rule engine
   monitor.py             post-signal exit monitor
   journal.py             trade log and statistics
+  currency.py            INR context and MCX strike guidance
   scheduler.py           local APScheduler pipeline
 tests/                   rule engine tests, including the reference week
 docs/twpr_setup_spec.md  source of truth for the rules

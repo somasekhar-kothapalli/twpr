@@ -61,6 +61,36 @@ def send_error(script_name: str, exc: BaseException) -> bool:
     )
 
 
+def _strike_lines(signal: dict) -> list[str]:
+    """The INR strike guidance block, empty when there is no market data.
+
+    MCX is quoted in INR, so the strike that is actually at the money depends on
+    USD/INR as well as WTI — this is the part you act on at 20:00.
+    """
+    level = signal.get("mcx_implied_level")
+    if not level:
+        return ["", "Strike: no market data — check the option chain yourself"]
+
+    wanted = "strike_1_otm" if signal.get("strike_type") == "1-OTM" else "strike_atm"
+    strike = signal.get(wanted)
+
+    lines = [
+        "",
+        f"MCX implied: ₹{level:,.0f}  (WTI × USD/INR {signal.get('usd_inr_close')})",
+        f"Strike: {strike:,} {str(signal.get('option_type', '')).upper()}"
+        if strike
+        else "Strike: unavailable",
+    ]
+
+    trend = signal.get("usd_inr_trend_pct")
+    effect = signal.get("currency_effect")
+    if trend is not None and effect in ("amplifies", "dampens"):
+        moved = "weaker" if trend > 0 else "stronger"
+        lines.append(f"Rupee: {abs(trend):.2f}% {moved} over 5 sessions — {effect} the move")
+
+    return lines
+
+
 def format_signal(signal: dict) -> str:
     """Render a signal dict as the Wednesday Telegram alert."""
     if signal.get("grade") == "skip":
@@ -87,9 +117,10 @@ def format_signal(signal: dict) -> str:
         f"Trade: {str(signal.get('option_type', '')).upper()} "
         f"{signal.get('strike_type')} | size {signal.get('size_pct')}% of capital",
         f"Confidence: {signal.get('confidence')}",
-        "",
-        "Exits: stop -40% | T1 +50% (half) | T2 +100% | hard close 22:30 IST",
     ]
+
+    lines.extend(_strike_lines(signal))
+    lines += ["", "Exits: stop -40% | T1 +50% (half) | T2 +100% | hard close 22:30 IST"]
 
     drivers = signal.get("key_drivers") or []
     if drivers:

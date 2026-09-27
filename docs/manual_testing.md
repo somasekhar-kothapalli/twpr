@@ -84,7 +84,7 @@ use `2026-09-18`; substitute a released week when you read this.
 python -m pytest tests/ -q
 ```
 
-Expect `110 passed`. These are all offline. If this fails, stop here — nothing
+Expect `143 passed`. These are all offline. If this fails, stop here — nothing
 below will be meaningful.
 
 Run just the reference week, the one test that must never go red:
@@ -385,6 +385,80 @@ skip zone, turning a Grade B trade into "no trade".
 
 Restore it with `python app/consensus_fetcher.py --crude -1.6 --gasoline 0.0
 --distillate 0.0 --previous -2.0 --week 2026-09-04`.
+
+---
+
+## 5b. Currency context and strike guidance
+
+MCX is INR-denominated, so the strike that is actually at the money depends on
+USD/INR as well as WTI. The context comes off `data/market_data.json`, so refresh
+it first:
+
+```bash
+python app/market_data.py --days 5
+python app/signal_engine.py
+python -c "import json;s=json.load(open('data/signal.json'));print({k:s[k] for k in ('usd_inr_close','usd_inr_trend_pct','currency_direction','currency_effect','mcx_implied_level','strike_atm','strike_1_otm','market_data_date')})"
+```
+
+**What to check.** `strike_atm` is a multiple of ₹50 nearest `mcx_implied_level`,
+and `strike_1_otm` is one interval **below** it for a put, **above** for a call.
+`market_data_date` should be today — an old date means the strike guidance is
+stale even though the signal is fresh.
+
+The sign convention, which is the easy thing to get backwards — a weakening rupee
+(USD/INR **up**) raises the INR price of crude:
+
+```bash
+python - <<'EOF'
+import sys; sys.path.insert(0,'app')
+import currency as cx
+for direction in ("bullish","bearish"):
+    for cd in ("inr_weakening","inr_strengthening","flat"):
+        print(f"  {direction:8} + {cd:18} -> {cx.effect_on(direction, cd)}")
+EOF
+```
+
+Expect bullish+weakening and bearish+strengthening to `amplify`, the other two to
+`dampen`, and anything flat to be `neutral`.
+
+Risk notes across the range, including the closed-market note:
+
+```bash
+python - <<'EOF'
+import sys; sys.path.insert(0,'app')
+from common import setup_logging; setup_logging()
+import currency as cx
+MARKET = {"date":"2026-09-27","wti_close":92.41,"usd_inr_close":95.802,"mcx_close":8853.06}
+for trend in (0.8, 0.3, 0.05, -0.3, -0.8):
+    blk = cx.context({**MARKET, "usd_inr_trend_pct": trend}, "bearish", "put")
+    print(f"
+  INR {trend:+.2f}% ({blk['currency_effect']}):")
+    for n in cx.risk_notes(blk, "bearish") or ["    (nothing to report)"]:
+        print(f"     - {n}")
+EOF
+```
+
+**What to check.** Anything adverse is always flagged. A move of 0.5% or more
+also adds the note that onshore USD/INR is closed 17:00–09:00 IST, so it cannot
+reverse during the trade. A mild tailwind earns no note.
+
+No market data at all must weaken the guidance, not break the signal:
+
+```bash
+rm -f data/market_data.json && python app/signal_engine.py && python -c "import json;s=json.load(open('data/signal.json'));print('strike_atm:',s['strike_atm'],'| direction:',s['currency_direction']);print([r for r in s['risks'] if 'USD/INR' in r])"
+```
+
+**What to check.** Exit 0, a real signal, `strike_atm: None`, and the risk note
+"No USD/INR data — strike guidance is unverified".
+
+The invariant, worth re-running after any signal-engine change:
+
+```bash
+python -m pytest tests/test_currency.py -k "cannot_move or reference_week" -v
+```
+
+**What to check.** `generate_signal()` still takes exactly the five inventory
+numbers and no currency argument, and the reference week is still B bearish 55.
 
 ---
 

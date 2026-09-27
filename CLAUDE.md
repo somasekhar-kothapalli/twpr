@@ -73,6 +73,28 @@ Three invariants hold this together:
 to `rule_based_narrative()` and the signal still ships. If a change would let a
 model output affect a number a trade is sized on, it is wrong.
 
+### Currency context is informational, deliberately
+
+`app/currency.py` adds the INR fields to a signal — `usd_inr_trend_pct`,
+`currency_direction`, `currency_effect`, `mcx_implied_level`, `strike_atm`,
+`strike_1_otm` — and contributes risk notes. It does **not** touch grade,
+direction or confidence, and `generate_signal()` takes no currency argument at
+all. `tests/test_currency.py` asserts that signature.
+
+The reason is not squeamishness: onshore USD/INR trades 09:00-17:00 IST and TWPR
+holds 20:00-22:30 IST, so the FX market is closed for the whole trade. Over six
+months the rupee flipped the sign of the MCX move versus WTI on 3.2% of days and
+was a median 12% of the move. It decides which strike is ATM and prices the
+overnight gap; it does not decide direction.
+
+If that ever changes, it changes in `docs/twpr_setup_spec.md` and the reference
+week first — adding a sixth step to the confidence formula would move the
+tradeable band off 45-85 and needs a USD/INR figure for 2026-09-04 that the
+reference fixture does not carry.
+
+The sign convention: a weakening rupee (USD/INR **up**) raises the INR price of
+crude, so it amplifies a bullish signal and dampens a bearish one.
+
 ### Signal logic is spec-driven
 
 `docs/twpr_setup_spec.md` is the source of truth for the 5-step rule engine.

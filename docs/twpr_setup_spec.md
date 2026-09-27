@@ -134,6 +134,62 @@ or changes the size.
 | A     | call if bullish, put if bearish    | ATM    | 2.0%            |
 | B     | call if bullish, put if bearish    | 1-OTM  | 1.5%            |
 
+## Currency context (INR)
+
+MCX CrudeOil is quoted in INR per barrel while the signal is derived from USD
+WTI inventories, so
+
+```
+MCX  ~  WTI (USD/bbl)  x  USD/INR
+```
+
+`app/currency.py` records what the rupee is doing and turns the implied MCX level
+into strike guidance. **It does not feed grade, direction or confidence.** Three
+reasons, and the third is the decisive one:
+
+- Over six months of daily data, WTI's mean absolute move is 2.89% against
+  USD/INR's 0.38% — WTI moves 7.7x the currency.
+- The rupee is a median 12% of the combined MCX move, and flipped the sign of the
+  MCX move versus WTI on only 3.2% of days.
+- **Onshore USD/INR trades 09:00-17:00 IST. TWPR holds 20:00-22:30 IST.** The
+  currency market is shut for the entire holding window, so the move being traded
+  is almost purely WTI. The rupee prices the overnight gap and decides which
+  strike is at the money — not the direction of a two-hour trade.
+
+### Fields added to the signal
+
+| Field | Meaning |
+| ----- | ------- |
+| `usd_inr_close` | latest USD/INR spot |
+| `usd_inr_trend_pct` | percent change over the market-data window (5 sessions) |
+| `wti_trend_pct` | same, for WTI |
+| `currency_direction` | `inr_weakening` (USD/INR up), `inr_strengthening`, `flat` (under 0.1%), `unknown` |
+| `currency_effect` | `amplifies`, `dampens` or `neutral`, relative to the WTI direction |
+| `mcx_implied_level` | WTI x USD/INR |
+| `strike_atm`, `strike_1_otm` | nearest strike, and the first out of the money |
+| `market_data_date` | the row those came from, so staleness is visible |
+
+### Direction convention
+
+A weakening rupee raises the INR price of crude:
+
+| WTI view | Rupee | Effect on the MCX move |
+| -------- | ----- | ---------------------- |
+| bullish | weakening | amplifies |
+| bullish | strengthening | dampens |
+| bearish | weakening | dampens |
+| bearish | strengthening | amplifies |
+
+### Strike selection
+
+Strikes are spaced `currency.STRIKE_INTERVAL` (₹50) apart. The ATM strike is the
+nearest one to `mcx_implied_level`; `1-OTM` is one interval **below** for a put
+and **above** for a call. Confirm the interval against the live option chain —
+it is an exchange parameter, not a constant of nature.
+
+Missing or stale `market_data.json` leaves every field null and adds the risk
+line "No USD/INR data — strike guidance is unverified". It never blocks a signal.
+
 ## Exit rules
 
 Enforced by `monitor.py`, polling every 60 seconds on the option premium.

@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, field
 import httpx
 from dotenv import load_dotenv
 
+import currency
 from common import DATA_DIR, env, now_utc, read_json, setup_logging, week_ending, write_json
 from petrocore_client import PetroCoreClient
 from telegram_bot import send_error
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 CONSENSUS_FILE = DATA_DIR / "consensus.json"
 API_REPORT_FILE = DATA_DIR / "api_report.json"
 EIA_ACTUAL_FILE = DATA_DIR / "eia_actual.json"
+MARKET_DATA_FILE = DATA_DIR / "market_data.json"
 SIGNAL_FILE = DATA_DIR / "signal.json"
 
 SKIP_THRESHOLD_MB = 1.0
@@ -298,12 +300,21 @@ def main() -> int:
             )
         )
 
+        # MCX is quoted in INR, the signal is derived from USD WTI. This records
+        # what the rupee is doing and turns it into strike guidance. It never
+        # touches grade, direction or confidence — see app/currency.py for why.
+        market = read_json(MARKET_DATA_FILE)
+        currency_block = currency.context(market, signal.direction, signal.option_type)
+        if signal.grade != "skip":
+            signal.risks.extend(currency.risk_notes(currency_block, signal.direction))
+
         week = eia.get("week_ending") or week_ending()
         payload = {
             "week_ending": week,
             "setup": "TWPR",
             "trade_type": env("TWPR_TRADE_TYPE", "paper"),
             **asdict(signal),
+            **currency_block,
             "generated_at": now_utc().isoformat(),
         }
         write_json(SIGNAL_FILE, payload)
