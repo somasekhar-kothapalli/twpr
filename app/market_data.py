@@ -186,7 +186,9 @@ def calculate_derived(row: dict) -> dict:
     row["mcx_close"] = round(wti * usd_inr, 2) if None not in (wti, usd_inr) else None
     row["mcx_source"] = "calculated"
 
-    row["source"] = "yfinance+eia_api"
+    # Every column now comes from yfinance: spot tickers plus the two nearest
+    # dated NYMEX contracts. EIA no longer contributes to this row.
+    row["source"] = "yfinance"
     row["fetched_at"] = now_utc().isoformat()
     return row
 

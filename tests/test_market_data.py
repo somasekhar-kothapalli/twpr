@@ -148,6 +148,8 @@ def test_crack_and_mcx_and_brent_spread():
     assert row["crack_321"] == pytest.approx(round(expected, 3), abs=1e-9)
     assert row["mcx_close"] == pytest.approx(round(92.41 * 95.802, 2), abs=1e-9)
     assert row["mcx_source"] == "calculated"
+    # Provenance must name what actually produced the row: EIA no longer does.
+    assert row["source"] == "yfinance"
 
 
 def test_derived_columns_survive_a_row_of_nothing():
