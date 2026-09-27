@@ -256,6 +256,27 @@ def main() -> int:
         # The API report is optional — the pipeline still trades without it.
         api_report = read_json(API_REPORT_FILE) or {}
 
+        # Every deviation subtracts consensus from actuals, so the two files must
+        # describe the same week. A stale consensus.json — Tuesday's fetch failed
+        # and Wednesday ran anyway — otherwise yields a plausible-looking number
+        # computed across two weeks, which can flip a trade to a skip or back.
+        # The EIA release defines the week, so it is the reference.
+        week = eia.get("week_ending")
+        if consensus.get("week_ending") != week:
+            raise ValueError(
+                f"week mismatch: EIA actuals are for {week} but consensus is for "
+                f"{consensus.get('week_ending')}. Re-run consensus_fetcher.py "
+                f"--week {week} before generating a signal."
+            )
+
+        if api_report and api_report.get("week_ending") != week:
+            logger.warning(
+                "API report is for %s, not %s — ignoring it rather than letting "
+                "another week's number move confidence",
+                api_report.get("week_ending"), week,
+            )
+            api_report = {}
+
         crude_deviation = eia["crude_change_mb"] - consensus["crude_consensus_mb"]
         gasoline_deviation = eia["gasoline_change_mb"] - consensus["gasoline_consensus_mb"]
         distillate_deviation = eia["distillate_change_mb"] - consensus["distillate_consensus_mb"]

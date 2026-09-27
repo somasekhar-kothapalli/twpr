@@ -101,7 +101,19 @@ def _calendar_rows(date_from: str, date_to: str) -> list[dict]:
 
     Returns dicts of {release_date, event, actual, forecast, previous}.
     """
-    from playwright.sync_api import sync_playwright
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        # Imported lazily so the rest of the pipeline runs without a browser.
+        # Say what to do: a bare "No module named 'playwright'" in the log looks
+        # like a code fault rather than a one-off setup step, and it bites again
+        # whenever a virtualenv predates playwright landing in requirements.txt.
+        raise RuntimeError(
+            "playwright is not installed in this interpreter. Run "
+            "`python -m pip install -r requirements.txt` and "
+            "`python -m playwright install chromium`. Until then "
+            "tradingeconomics_scraper is the only consensus source."
+        ) from exc
 
     script = """
     async ([country, tz, dateFrom, dateTo, path]) => {

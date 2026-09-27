@@ -106,6 +106,13 @@ Two boundary details that are easy to get backwards:
   schedule- or session-related. Never a naive datetime.
 - `week_ending()` returns the Friday the EIA report covers — the previous Friday
   from a Tuesday or Wednesday run, which is what every script wants.
+- **`signal_engine.main()` refuses to mix weeks.** The EIA release defines the
+  week; a `consensus.json` for any other week is a hard error, and an
+  `api_report.json` for another week is dropped rather than allowed to move
+  confidence. Deviations subtract consensus from actuals, so a stale consensus
+  produces a plausible number computed across two weeks — for the reference week
+  that is +0.209 instead of +1.209, which silently turns a Grade B trade into a
+  skip. `tests/test_signal_pipeline.py` pins this.
 
 ### Consensus sources
 
