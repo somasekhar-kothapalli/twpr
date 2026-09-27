@@ -245,10 +245,14 @@ JSON is how Wednesday's signal sees Tuesday's consensus. `data/active_trade.json
 
 - Angel One SmartAPI. `monitor.py:read_current_premium` prompts for the premium
   each minute; that function is the single seam to replace.
-- The EIA weekly series ids in `eia_parser.py` need one live run with a real
-  `EIA_API_KEY` to confirm. They are no longer load-bearing — a scraper covers
-  the week if the API returns nothing — but they are the first suspect if the API
-  path logs no rows.
+- The EIA **stock** series ids in `eia_parser.py` are verified (2026-09-27, all
+  four legs matched the scrapers exactly for week ending 2026-09-18). EIA's
+  **futures** series `RCLC1`/`RCLC2` are dead: they exist, return HTTP 200, and
+  stopped publishing on 2024-04-05, so a later `start` yields zero rows with no
+  error. Do not reinstate them. `market_data.py` takes the WTI curve from dated
+  NYMEX contracts instead — expired ones 404, which is how the live front two
+  identify themselves, and `_check_front_month` warns if M1 drifts more than 1%
+  from the `CL=F` continuous.
 - PetroCore's `/api/v1/twpr/eia-report` constrains `source` to
   `eia_api`, `tankertrackers+eia_api` or `wbos`, so a scraped week is rejected
   with a 422. The POST is non-blocking and the JSON file still holds the week, but

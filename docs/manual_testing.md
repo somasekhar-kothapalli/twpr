@@ -84,7 +84,7 @@ use `2026-09-18`; substitute a released week when you read this.
 python -m pytest tests/ -q
 ```
 
-Expect `172 passed, 4 deselected` — the deselected four are the
+Expect `188 passed, 4 deselected` — the deselected four are the
 network-backed strike-interval checks. These are all offline. If this fails, stop here — nothing
 below will be meaningful.
 
@@ -741,7 +741,12 @@ cat data/market_data.json
 **What to check.** `wti_close` in the 60–110 range, `mcx_close` ≈
 `wti_close × usd_inr_close`. `brent_wti_spread` is normally 3–5 — a much wider
 number means yfinance served something odd, which also corrupts `crack_321`.
-`wti_m1m2_spread` is null without `EIA_API_KEY`; that is expected.
+
+The log names the contracts it chose, e.g. `WTI front contracts: M1 CLX26.NYM,
+M2 CLZ26.NYM`. `wti_m1_price` should equal `wti_close` almost exactly, since
+`CL=F` *is* the front month — a gap over 1% logs a roll warning and means
+`wti_m1m2_spread` is being measured off the wrong pair. A positive spread is
+backwardation (tight), negative is contango (oversupplied).
 
 ### Scheduler
 

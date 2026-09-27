@@ -27,7 +27,7 @@ Wed      20:05  monitor.py             exit monitor, hard close 22:30 IST
 | --------- | ----- | ------------------ |
 | `signal_engine.py` | done | 31 tests green; reference week end-to-end on fixtures |
 | `petrocore_client.py` | done | 10s timeout, 2×2s retry on 5xx, never raises; skip path exercised |
-| `market_data.py` | done | live yfinance fetch; derived columns checked against the spec example |
+| `market_data.py` | done | live fetch; WTI curve from dated NYMEX contracts, derived columns hand-checked |
 | `eia_parser.py` | done | scraper fallback live-verified; API series ids still unconfirmed (no key yet) |
 | `telegram_bot.py` | done | all five message shapes rendered (signal, skip, stop, target, hard close) |
 | `monitor.py` | done | exit conditions incl. partial T1 then hard close on a 4-lot position |
@@ -59,7 +59,7 @@ configured.
 
 | Variable | Needed? | Notes |
 | -------- | ------- | ----- |
-| `EIA_API_KEY` | no | free at [eia.gov/opendata](https://www.eia.gov/opendata/); without it `eia_parser.py` scrapes instead and `refinery_util_pct` is null |
+| `EIA_API_KEY` | no | free at [eia.gov/opendata](https://www.eia.gov/opendata/); without it `eia_parser.py` scrapes instead and `refinery_util_pct` is null. `market_data.py` no longer needs it |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | yes | without them alerts are logged, not sent |
 | `MODEL_MODE` | no | `groq` \| `ollama` \| `rule_based` (default) |
 | `GROQ_API_KEY`, `GROQ_MODEL` | no | only for `MODEL_MODE=groq` |
@@ -167,7 +167,7 @@ app/
   common.py              paths, logging, IST clock, JSON helpers
   petrocore_client.py    PetroCore HTTP client — optional, never raises
   telegram_bot.py        alerts + the shared send_message/send_error
-  market_data.py         yfinance + EIA futures
+  market_data.py         yfinance spot + the two nearest NYMEX contracts
   consensus_fetcher.py   Tuesday consensus
   api_monitor.py         API private report
   tradingeconomics_scraper.py  consensus + API report, plain HTTP (primary)

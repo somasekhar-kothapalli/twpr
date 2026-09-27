@@ -1,23 +1,26 @@
-"""Fetch daily market data from yfinance and the EIA API, then publish it.
+"""Fetch daily market data from yfinance and publish it.
 
 Runs 09:00 IST on weekdays. Pulls the last 5 trading days so a missed day is
 backfilled on the next run.
+
+The WTI M1-M2 spread comes from the two nearest dated NYMEX contracts rather than
+the EIA API: EIA's RCLC1/RCLC2 futures series exist but stopped publishing on
+2024-04-05, so any start date after that returns zero rows. Dated contracts also
+give the real curve instead of a continuous splice.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
-from datetime import timedelta
+from datetime import date
 
-import httpx
 import pandas as pd
 import yfinance as yf
 from dotenv import load_dotenv
 
-from common import DATA_DIR, env, now_utc, setup_logging, write_json
+from common import DATA_DIR, now_utc, setup_logging, write_json
 from currency import classify, trend_pct
 from expiry import refresh_cache
 from petrocore_client import PetroCoreClient
@@ -38,8 +41,12 @@ TICKERS = {
     "HO=F": "heating_oil_close",  # Heating oil, $/gallon
 }
 
-EIA_FUTURES_URL = "https://api.eia.gov/v2/petroleum/pri/fut/data/"
-EIA_SERIES = {"RCLC1": "wti_m1_price", "RCLC2": "wti_m2_price"}
+# NYMEX delivery-month codes, Jan..Dec. CL contracts are monthly.
+MONTH_CODES = "FGHJKMNQUVXZ"
+CONTRACT_TEMPLATE = "CL{code}{year:02d}.NYM"
+# How many months ahead to offer as candidates. Expired contracts 404 and drop
+# out, so this only has to be wide enough to cover the two live front months.
+CONTRACT_CANDIDATES = 8
 
 GALLONS_PER_BARREL = 42
 LOOKBACK_DAYS = 5
@@ -66,33 +73,86 @@ def fetch_yfinance(lookback_days: int = LOOKBACK_DAYS) -> pd.DataFrame:
     return closes
 
 
-def fetch_eia_futures(api_key: str, start: str) -> pd.DataFrame:
-    """WTI M1/M2 continuous futures prices from the EIA API, indexed by date string."""
-    params = {
-        "api_key": api_key,
-        "frequency": "daily",
-        "data[0]": "value",
-        "start": start,
-        "sort[0][column]": "period",
-        "sort[0][direction]": "desc",
-        "length": "100",
-    }
-    # httpx repeats a list value as facets[series][]=RCLC1&facets[series][]=RCLC2
-    params_list = list(params.items()) + [("facets[series][]", s) for s in EIA_SERIES]
+def contract_tickers(as_of: date, count: int = CONTRACT_CANDIDATES) -> list[str]:
+    """Candidate NYMEX WTI contract tickers from `as_of`'s month forward."""
+    tickers = []
+    year, month = as_of.year, as_of.month
+    for _ in range(count):
+        tickers.append(
+            CONTRACT_TEMPLATE.format(code=MONTH_CODES[month - 1], year=year % 100)
+        )
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+    return tickers
 
-    response = httpx.get(EIA_FUTURES_URL, params=params_list, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
-    rows = response.json()["response"]["data"]
-    if not rows:
-        logger.warning("EIA futures returned no rows from %s", start)
+
+def fetch_front_contracts(lookback_days: int = LOOKBACK_DAYS, as_of: date | None = None) -> pd.DataFrame:
+    """Closes for the two nearest live WTI contracts, as wti_m1_price / wti_m2_price.
+
+    Contracts that have already expired return nothing from yfinance, so the live
+    ones identify themselves: order the candidates by delivery month and take the
+    first two that actually have data.
+    """
+    candidates = contract_tickers(as_of or now_utc().date())
+
+    # Expired contracts 404, which is how the live ones identify themselves — so
+    # yfinance's ERROR lines for them are the mechanism working, not a fault.
+    # Quieten it for this call only; real yfinance problems elsewhere still show.
+    yf_logger = logging.getLogger("yfinance")
+    previous_level = yf_logger.level
+    yf_logger.setLevel(logging.CRITICAL)
+    try:
+        raw = yf.download(
+            candidates,
+            period=f"{lookback_days * 3}d",
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+        )
+    finally:
+        yf_logger.setLevel(previous_level)
+    if raw.empty:
+        logger.warning("No WTI contract data returned — M1/M2 will be null")
         return pd.DataFrame()
 
-    frame = pd.DataFrame(rows)
-    frame = frame[frame["series"].isin(EIA_SERIES)]
-    pivoted = frame.pivot_table(index="period", columns="series", values="value", aggfunc="last")
-    pivoted = pivoted.rename(columns=EIA_SERIES).astype(float)
-    logger.info("EIA futures: %d dates, latest %s", len(pivoted), pivoted.index.max())
-    return pivoted
+    closes = raw["Close"] if "Close" in raw else pd.DataFrame()
+    # Keep candidate order (nearest delivery first), drop contracts with no data.
+    live = [t for t in candidates if t in closes.columns and closes[t].notna().any()]
+    if len(live) < 2:
+        logger.warning("Fewer than two live WTI contracts (%s) — M1/M2 will be null", live)
+        return pd.DataFrame()
+
+    m1, m2 = live[0], live[1]
+    logger.info("WTI front contracts: M1 %s, M2 %s", m1, m2)
+
+    frame = closes[[m1, m2]].rename(columns={m1: "wti_m1_price", m2: "wti_m2_price"})
+    frame = frame.dropna(how="all")
+    frame.index = [d.date().isoformat() for d in frame.index]
+    return frame
+
+
+def _check_front_month(closes: pd.DataFrame) -> None:
+    """Warn when M1 and the continuous front month disagree.
+
+    `CL=F` is the front-month continuous, so it should equal the nearest dated
+    contract. A gap means the contract roll was misread and the spread would be
+    measured off the wrong pair.
+    """
+    if "wti_close" not in closes or "wti_m1_price" not in closes:
+        return
+    latest = closes.dropna(subset=["wti_close", "wti_m1_price"]).tail(1)
+    if latest.empty:
+        return
+
+    spot = float(latest["wti_close"].iloc[0])
+    m1 = float(latest["wti_m1_price"].iloc[0])
+    if spot and abs(m1 - spot) / spot > 0.01:
+        logger.warning(
+            "M1 %.2f is more than 1%% from the continuous front month %.2f — "
+            "check the contract roll before trusting wti_m1m2_spread",
+            m1, spot,
+        )
 
 
 def calculate_derived(row: dict) -> dict:
@@ -132,19 +192,22 @@ def calculate_derived(row: dict) -> dict:
 
 
 def build_rows(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
-    """Merge yfinance and EIA data on date and derive the calculated columns."""
+    """Merge spot closes and the front two contracts, then derive the columns."""
     closes = fetch_yfinance(lookback_days)
 
-    api_key = env("EIA_API_KEY")
-    if api_key:
-        start = (now_utc().date() - timedelta(days=lookback_days * 3)).isoformat()
-        try:
-            eia = fetch_eia_futures(api_key, start)
-            closes = closes.join(eia, how="left")
-        except (httpx.HTTPError, KeyError, ValueError) as exc:
-            logger.error("EIA futures fetch failed, continuing without M1/M2: %s", exc)
-    else:
-        logger.warning("EIA_API_KEY not set — wti_m1_price/wti_m2_price will be null")
+    try:
+        contracts = fetch_front_contracts(lookback_days)
+        if not contracts.empty:
+            closes = closes.join(contracts, how="left")
+            # The spot columns are already forward-filled, so the newest row can be
+            # a weekend or holiday date the contracts have no print for. Fill them
+            # the same way: with the pits shut, the last known curve is the curve.
+            closes[["wti_m1_price", "wti_m2_price"]] = closes[
+                ["wti_m1_price", "wti_m2_price"]
+            ].ffill()
+            _check_front_month(closes)
+    except Exception as exc:  # noqa: BLE001 — the curve is a nice-to-have, not the row
+        logger.error("Front-contract fetch failed, continuing without M1/M2: %s", exc)
 
     rows = []
     for date_str, series in closes.iterrows():

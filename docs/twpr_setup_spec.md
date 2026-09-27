@@ -323,6 +323,13 @@ back to `rule_based` and the signal still ships.
 
 - **Scraped weeks carry no `refinery_util_pct`.** Recorded only; no rule reads
   it. A week sourced from a scraper has it null.
+- **WTI M1/M2 comes from dated NYMEX contracts, not the EIA API.** EIA's
+  `RCLC1`/`RCLC2` futures series still exist but stopped publishing on
+  2024-04-05, so any query with a later start date returns zero rows and no
+  error. `market_data.py` now takes the two nearest live NYMEX contracts
+  (`CL{month}{yy}.NYM`) instead. Expired contracts 404, which is how the live ones
+  identify themselves, and M1 is cross-checked against the `CL=F` continuous front
+  month — a drift over 1% warns that the roll was misread.
 - **EIA series ids** in `app/eia_parser.py` (`WCESTUS1`,
   `W_EPC0_SAX_YCUOK_MBBL`, `WGTSTUS1`, `WDISTUS1`, `WPULEUS3`) need one live run
   against a real `EIA_API_KEY` to confirm. They are the first thing to check if
