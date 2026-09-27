@@ -95,6 +95,21 @@ reference fixture does not carry.
 The sign convention: a weakening rupee (USD/INR **up**) raises the INR price of
 crude, so it amplifies a bullish signal and dampens a bearish one.
 
+`STRIKE_INTERVAL` (₹50) was verified 2026-09-27 against the live chain — all 547
+consecutive gaps across three CRUDEOIL option expiries were exactly 50.0. Re-check
+with `python -m pytest tests/test_strike_interval.py -v -m network`; that file is
+the only one that touches the network and `pytest.ini` deselects it by default, so
+the normal suite stays offline. MCX's own site is Akamai-blocked to both plain
+HTTP and a headless browser, so Zerodha's public instrument master
+(`https://api.kite.trade/instruments`, no auth) is the practical source for
+anything about the live chain.
+
+Also learned from that data and worth remembering: MCX CRUDEOIL **options expire
+2–4 days before the futures**, so "near month" is two different dates, and
+Zerodha's `lot_size` field counts *contracts* (1), not barrels — the 100-barrel
+multiplier in `journal.py` and `monitor.py` comes from the MCX contract spec and
+is correct.
+
 ### Signal logic is spec-driven
 
 `docs/twpr_setup_spec.md` is the source of truth for the 5-step rule engine.

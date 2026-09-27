@@ -144,8 +144,9 @@ python app/journal.py export   # -> data/journal_export.csv
 ## Tests
 
 ```bash
-python -m pytest tests/ -q
+python -m pytest tests/ -q                                  # offline, fast
 python -m pytest tests/test_signal_engine.py::test_reference_week_sep4_2026 -v
+python -m pytest tests/test_strike_interval.py -m network -v # checks the live MCX chain
 ```
 
 31 tests. The rule engine: skip zone and grade boundaries (both
@@ -196,6 +197,9 @@ data/                    pipeline output; reference_week.json is the fixture
 
 - Angel One SmartAPI — `monitor.py` prompts for the option premium each minute.
   `read_current_premium()` is the single function to replace.
+- No days-to-expiry guard. MCX CrudeOil options expire 2–4 days before the
+  futures, so a Wednesday can land one or two days from expiry — brutal for a
+  buyer. Needs a spec decision, not just code.
 - EIA weekly series ids in `eia_parser.py` (`WCESTUS1`,
   `W_EPC0_SAX_YCUOK_MBBL`, `WGTSTUS1`, `WDISTUS1`, `WPULEUS3`) need one live run
   to confirm. No longer load-bearing — a scraper covers the week — but the first

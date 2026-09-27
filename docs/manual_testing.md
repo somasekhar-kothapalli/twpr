@@ -84,7 +84,8 @@ use `2026-09-18`; substitute a released week when you read this.
 python -m pytest tests/ -q
 ```
 
-Expect `143 passed`. These are all offline. If this fails, stop here — nothing
+Expect `143 passed, 4 deselected` — the deselected four are the
+network-backed strike-interval checks. These are all offline. If this fails, stop here — nothing
 below will be meaningful.
 
 Run just the reference week, the one test that must never go red:
@@ -450,6 +451,17 @@ rm -f data/market_data.json && python app/signal_engine.py && python -c "import 
 
 **What to check.** Exit 0, a real signal, `strike_atm: None`, and the risk note
 "No USD/INR data — strike guidance is unverified".
+
+Re-verify the ₹50 strike interval against the live MCX chain (the only test that
+touches the network, so it is deselected by default):
+
+```bash
+python -m pytest tests/test_strike_interval.py -v -m network
+```
+
+**What to check.** All four pass. If `test_every_strike_gap_equals_the_configured_interval`
+fails it names the gaps it actually saw — MCX has respaced the chain and
+`currency.STRIKE_INTERVAL` needs updating. An offline run skips rather than fails.
 
 The invariant, worth re-running after any signal-engine change:
 

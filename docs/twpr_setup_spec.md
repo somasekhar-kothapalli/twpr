@@ -184,8 +184,34 @@ A weakening rupee raises the INR price of crude:
 
 Strikes are spaced `currency.STRIKE_INTERVAL` (₹50) apart. The ATM strike is the
 nearest one to `mcx_implied_level`; `1-OTM` is one interval **below** for a put
-and **above** for a call. Confirm the interval against the live option chain —
-it is an exchange parameter, not a constant of nature.
+and **above** for a call.
+
+**Interval verified 2026-09-27** against the live chain in Zerodha's public
+instrument master: every one of the 547 consecutive strike gaps across the three
+listed CRUDEOIL option expiries was exactly 50.0 (Oct 207 strikes spanning
+3,200–13,500, Nov 185, Dec 158), and every listed strike is a multiple of 50. The
+computed ATM and 1-OTM strikes were checked against the real ladder and match.
+
+It remains an exchange parameter. Re-check with
+`python -m pytest tests/test_strike_interval.py -v -m network`. MCX's own site is
+behind an Akamai block that refuses both plain HTTP and a headless browser, so the
+broker instrument master is the practical source.
+
+### Option expiry is not futures expiry
+
+MCX CRUDEOIL **options expire two to four days before** the futures contract they
+settle into — observed 2026-09-27:
+
+| Options expire | Futures expire | Gap |
+| -------------- | -------------- | --- |
+| 2026-10-15 | 2026-10-19 | 4 days |
+| 2026-11-17 | 2026-11-19 | 2 days |
+| 2026-12-16 | 2026-12-18 | 2 days |
+
+So "near month" is two different dates. On a Wednesday close to option expiry the
+near-month option may have only a day or two of life left, which for an options
+**buyer** means theta and a collapsing bid well beyond the usual post-release IV
+crush. Nothing in the engine checks this yet — see the open items.
 
 Missing or stale `market_data.json` leaves every field null and adds the risk
 line "No USD/INR data — strike guidance is unverified". It never blocks a signal.
@@ -254,6 +280,12 @@ alone and are identical whatever `MODEL_MODE` is set to. Any AI failure falls
 back to `rule_based` and the signal still ships.
 
 ## Open items
+
+- **No days-to-expiry guard.** The setup buys the near-month option without
+  checking how long it has left. Options expire 2–4 days before the futures, so a
+  Wednesday can land one or two days from expiry. Worth a rule — skip, or roll to
+  the next expiry, below some threshold — but it is a spec decision, not a code
+  tweak.
 
 - **Scraped weeks carry no `refinery_util_pct`.** Recorded only; no rule reads
   it. A week sourced from a scraper has it null.

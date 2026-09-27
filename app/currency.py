@@ -28,8 +28,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 # MCX CrudeOil option strikes are spaced this far apart, in INR per barrel.
-# ponytail: exchange parameter, not a law of nature -- confirm against the live
-# option chain and change here if MCX respaces it.
+#
+# Verified 2026-09-27 against the live chain in Zerodha's public instrument master
+# (https://api.kite.trade/instruments, no auth): every one of the 547 consecutive
+# strike gaps across the three listed CRUDEOIL option expiries was exactly 50.0 —
+# Oct 2026 had 207 strikes spanning 3,200-13,500, Nov 185, Dec 158.
+#
+# Still an exchange parameter rather than a law of nature. Re-check with:
+#   python -m pytest tests/test_strike_interval.py -v   (hits the network)
 STRIKE_INTERVAL = 50
 
 # Below this, a move is noise rather than a trend worth reporting.
