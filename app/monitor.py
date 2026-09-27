@@ -41,7 +41,10 @@ TARGET_2_PCT = 100.0
 def _prompt_float(label: str, minimum: float | None = None) -> float:
     """Read a float from the terminal, re-asking until it is valid."""
     while True:
-        raw = input(f"  {label}: ").strip()
+        try:
+            raw = input(f"  {label}: ").strip()
+        except EOFError as exc:
+            raise RuntimeError(f"input ended while waiting for {label!r}") from exc
         try:
             value = float(raw)
         except ValueError:
@@ -92,7 +95,16 @@ def confirm_entry(signal: dict) -> dict | None:
 
 def read_current_premium(last: float) -> float:
     """Read the current option premium. Blank input reuses the last value."""
-    raw = input(f"  Current premium [{last}]: ").strip()
+    try:
+        raw = input(f"  Current premium [{last}]: ").strip()
+    except EOFError as exc:
+        # Ctrl+D, or a piped run that ran out of lines. The position is still open
+        # and already persisted, so say how to pick it back up rather than dumping
+        # a traceback on someone who is mid-trade.
+        raise RuntimeError(
+            "input ended while the position is still open — "
+            "resume with: python app/monitor.py --resume"
+        ) from exc
     if not raw:
         return last
     try:
