@@ -1,0 +1,21 @@
+{
+  "date": "2026-09-28",
+  "brent_close": 100.79,
+  "wti_close": 95.72,
+  "dxy_close": 101.106,
+  "heating_oil_close": 4.6166,
+  "usd_inr_close": 95.98,
+  "rbob_close": 3.2479,
+  "wti_m1_price": 95.74,
+  "wti_m2_price": 91.65,
+  "wti_m1m2_spread": 4.09,
+  "crack_321": 59.854,
+  "brent_wti_spread": 5.07,
+  "mcx_close": 9187.21,
+  "mcx_source": "calculated",
+  "source": "yfinance",
+  "fetched_at": "2026-09-28T10:01:02.330650+00:00",
+  "usd_inr_trend_pct": 0.28,
+  "wti_trend_pct": 1.195,
+  "trend_sessions": 5
+}
