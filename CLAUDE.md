@@ -150,9 +150,9 @@ all four fields are valid.
   not `pending_row`: after the report prints, the next-unreleased row jumps to next
   week, which would be wrong here. If that row hasn't printed it fails "not released
   yet" (and the poll retries).
-- Unverified: TE reports gasoline and distillate as **both -2.16** for the 22-09
-  release (their "previous" differ: 1.46 vs 1.61). Suspiciously equal and no second
-  source exists to check — look at those two TE pages by hand before trading on them.
+- TE's gasoline and distillate both read **-2.16** for the 22-09 release. Checked against
+  TE's own news text: gasoline fell 2.16 mb, distillate 2.164 mb (the snapshot rounds to
+  2 dp), so the equal values are a coincidence, not a duplicated column.
 - TE and investing.com show the same API release a few minutes apart in `time`
   (02:30 vs 02:00 AM IST); the dates and values agree.
 
@@ -326,8 +326,8 @@ on investing.com, no refinery utilisation on TE) — callers skip it.
   return rows from 2016/2022 with no error, so they are deliberately absent from the
   registry. The network health test asserts the newest released row is <= 21 days old.
   Always check `release_date` freshness on a new slug. TE's `api_gasoline` and
-  `api_distillate` both read -2.16 for the latest week (suspiciously equal) and could
-  not be cross-checked against investing.com — treat as unverified.
+  `api_distillate` both read -2.16 for the 22-09 release; that is genuine (-2.16 and
+  -2.164 per TE's news text), just rounded to 2 dp.
 - investing.com slugs are `<event-name>-<event-id>` (e.g. `...-75`); TE slugs are
   `united-states/<indicator>`.
 - Some TE pages (API Cushing/gasoline/distillate) have **no calendar table**, only
