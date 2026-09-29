@@ -282,7 +282,7 @@ def test_usd_inr_falls_back(monkeypatch, kwargs):
     assert fetch_usd_inr() == (84.0, "fallback")
 
 
-def fake_groq(monkeypatch, content=None, error=None, calls=None):
+def fake_groq(monkeypatch, content=None, error=None, calls=None, finish_reason="stop"):
     class Client:
         def __init__(self, api_key, timeout):
             self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self.create))
@@ -293,19 +293,58 @@ def fake_groq(monkeypatch, content=None, error=None, calls=None):
             if error:
                 raise error
             message = types.SimpleNamespace(content=content)
-            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message)])
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message, finish_reason=finish_reason)])
     fake_module(monkeypatch, "groq", Groq=Client)
 
 
-def test_groq_success_truncates_and_names_the_model(monkeypatch):
+THREE = ("The +3.569 mb crude build signals immediate WTI weakness. "
+         "The +2.266 mb Cushing build confirms it. A refinery restart is the key risk.")
+
+
+def analyse_with(monkeypatch, content, finish_reason="stop"):
     monkeypatch.setenv("GROQ_API_KEY", "k")
     monkeypatch.setenv("GROQ_MODEL", "llama-test")
+    fake_groq(monkeypatch, content=content, finish_reason=finish_reason)
+    return generate_analysis("prompt")
+
+
+def test_groq_success_keeps_all_three_sentences_and_names_the_model(monkeypatch):
     calls = []
-    fake_groq(monkeypatch, content="  " + "x" * 300 + "  ", calls=calls)
-    text, model = generate_analysis("prompt")
-    assert text == "x" * 200 and model == "groq/llama-test"
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    monkeypatch.setenv("GROQ_MODEL", "llama-test")
+    fake_groq(monkeypatch, content="  " + THREE + "  ", calls=calls)
+    assert generate_analysis("prompt") == (THREE, "groq/llama-test")     # ~150 chars: the old 200 cap would not have saved a real reply
     assert calls[0]["max_tokens"] == 150 and calls[0]["temperature"] == 0.3
     assert calls[0]["messages"][0]["content"] == se.GROQ_SYSTEM_PROMPT
+
+
+def test_a_normal_length_reply_is_never_cut(monkeypatch):
+    reply = ("The +3.569 mb crude inventory surplus signals immediate downward pressure on WTI prices. The +2.266 mb "
+             "Cushing build confirms this bearish signal, while the -2.800% drop in refinery utilization removes "
+             "demand support. A sudden geopolitical escalation could instantly reverse this price action.")
+    assert 250 < len(reply) < se.ANALYSIS_MAX_CHARS
+    assert analyse_with(monkeypatch, reply)[0] == reply
+
+
+def test_an_over_long_reply_is_cut_at_a_sentence_end_never_mid_word(monkeypatch):
+    text, _ = analyse_with(monkeypatch, "Sentence number one is here. " * 40)
+    assert len(text) <= se.ANALYSIS_MAX_CHARS and text.endswith("here.") and text.count("Sentence") == text.count(".")
+
+
+def test_a_reply_cut_by_max_tokens_drops_the_unfinished_sentence(monkeypatch):
+    text, _ = analyse_with(monkeypatch, "Build of +3.569 mb signals weakness. Cushing +2.266 mb confirms. The refinery uti", "length")
+    assert text == "Build of +3.569 mb signals weakness. Cushing +2.266 mb confirms."
+
+
+def test_decimal_points_are_not_sentence_ends():
+    assert se.complete_sentences("Build of +3.569 mb signals weakness. The refinery is at 97.8") == "Build of +3.569 mb signals weakness."
+    assert se.complete_sentences("no terminator here") == "no terminator here"
+    assert se.complete_sentences("Done! Really? Yes and then") == "Done! Really?"
+
+
+def test_no_terminator_at_all_falls_back_to_a_hard_cut(monkeypatch):
+    text, _ = analyse_with(monkeypatch, "x" * 900)
+    assert text == "x" * se.ANALYSIS_MAX_CHARS
 
 
 def test_groq_failure_or_missing_key_never_blocks(monkeypatch):

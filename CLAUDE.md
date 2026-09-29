@@ -254,10 +254,13 @@ rules, writes `data/signal.json` (`inputs` / `calculations` / `signal` /
   **404 for this account**; available chat models are `qwen/qwen3.8-27b` (works),
   `openai/gpt-oss-20b/120b` (reasoning models: they spend `max_tokens=150` on hidden
   reasoning and return empty content, so the narrative silently falls back) and
-  `allam-2-7b`. Set `GROQ_MODEL` in `.env` (it is blank today). The spec truncates the
-  reply to **200 chars** (`ANALYSIS_MAX_CHARS`), which cuts the 3-sentence narrative
-  mid-sentence; the model also invented a "$0.50 drop" target absent from the inputs.
-  The narrative is display-only, but do not trust its numbers.
+  `allam-2-7b`. Set `GROQ_MODEL` in `.env` (it is blank today). Groq itself finishes its
+  sentences (`finish_reason='stop'`, ~60 tokens, 230-300 chars). The spec's 200-char cap
+  was what cut them mid-word, so `ANALYSIS_MAX_CHARS` is 450 and an over-long reply (or
+  `finish_reason='length'`) is trimmed back to the last complete sentence
+  (`complete_sentences`; a "." inside "+3.569 mb" is not a sentence end). The model also
+  invents figures absent from the inputs (e.g. a "$0.50 drop"). The narrative is
+  display-only, but do not trust its numbers.
 - Input `load_inputs(data_dir=None)` resolves `DATA_DIR` at call time; an import-time
   default silently ignores test patching and reads the real `data/`.
 
@@ -274,8 +277,8 @@ trade detail; missing optional data reads `N/A`, not a crash. Runs after `signal
   days -> error alert + exit 1. `--allow-stale` sends it anyway, first line
   `REPLAY - data is N days old, NOT a live signal`. Missing/corrupt file -> error alert too.
 - Verified live: Telegram accepted a test alert and a replay of the 23-09 signal (607 chars).
-- Known cosmetic: the narrative is cut at `ANALYSIS_MAX_CHARS` (200), so it shows up
-  mid-word in the message ("...risk to thi"). Raise the constant in `signal_engine.py`.
+- The narrative arrives as complete sentences (engine cap 450 chars, trimmed at a sentence
+  end); an earlier 200-char cap showed it cut mid-word in the message.
 - Windows consoles are cp1252: never `print()` this text (emoji raise `UnicodeEncodeError`);
   the script only logs, and `setup_logging` forces UTF-8.
 

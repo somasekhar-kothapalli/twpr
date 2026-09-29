@@ -16,6 +16,7 @@ Run from the repo root:
 import argparse
 import json
 import logging
+import re
 import sys
 import threading
 
@@ -45,7 +46,8 @@ FALLBACK_USD_INR = 84.0
 USD_INR_PLAUSIBLE = (50.0, 150.0)  # a quote outside this is bad data, not a rate
 USD_INR_TIMEOUT_S = 10
 GROQ_TIMEOUT_S = 15.0
-ANALYSIS_MAX_CHARS = 200
+ANALYSIS_MAX_CHARS = 450   # 3 sentences / 70 words; replies run ~230-300 chars
+_SENTENCE_END = re.compile(r"[.!?](?=\s|$)")  # a "." inside "+3.569 mb" is not a sentence end
 GROQ_SYSTEM_PROMPT = (
     "You are a crude oil options trading analyst.\n"
     "Write exactly 3 sentences.\n"
@@ -273,6 +275,12 @@ def build_prompt(inputs, calc, grade, direction, confidence, cushing_contradicts
     )
 
 
+def complete_sentences(text):
+    """`text` cut back to its last complete sentence (unchanged if it has none)."""
+    ends = list(_SENTENCE_END.finditer(text))
+    return text[:ends[-1].end()] if ends else text
+
+
 def generate_analysis(user_prompt):
     """(analysis, model_used) from Groq, or ("", "rule_based") if the key is missing or
     anything fails. The only place a model is involved, and it only writes prose."""
@@ -287,7 +295,11 @@ def generate_analysis(user_prompt):
             model=model, max_tokens=150, temperature=0.3,
             messages=[{"role": "system", "content": GROQ_SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
         )
-        text = response.choices[0].message.content.strip()[:ANALYSIS_MAX_CHARS].strip() # type: ignore
+        choice = response.choices[0]
+        text = choice.message.content.strip()
+        if len(text) > ANALYSIS_MAX_CHARS or getattr(choice, "finish_reason", None) == "length":
+            # over the cap, or the model ran out of tokens mid-sentence: never ship half a sentence
+            text = complete_sentences(text[:ANALYSIS_MAX_CHARS]).strip() # type: ignore
     except Exception as exc:  # noqa: BLE001 - the signal ships without a narrative
         logger.warning("Groq failed (%s: %s) - no narrative", type(exc).__name__, exc)
         return "", "rule_based"
