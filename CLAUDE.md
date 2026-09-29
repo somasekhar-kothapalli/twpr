@@ -10,180 +10,70 @@ repo's output.** Reliability and correctness over cleverness.
 
 Options **buyer only**, never a seller. Max 2% of capital on a Grade A trade.
 
+**The repo is mid-rewrite.** `feature/v0.1` currently has the rule engine, the
+expiry gate, the currency module, the monitor/journal/scheduler layer, the
+PetroCore client, and the entire test suite and docs removed from the working
+tree (uncommitted, not staged). What's left is the three Tuesday/Wednesday data
+fetchers, the two scrapers, and Telegram delivery. `signal_engine.py` exists as
+an empty file and `telegram_bot.py` still expects to read `data/signal.json`
+from it — that wiring is currently broken. The GitHub Actions workflows still
+invoke `app/market_data.py` and `app/signal_engine.py`, which no longer exist /
+no longer do anything. Don't assume the architecture described in old commits
+or in `docs/` (also removed) is live; check `git log` and what's actually on
+disk before relying on either.
+
 ## Commands
 
 ```bash
 pip install -r requirements.txt
 cp .env.example .env                     # then fill in the keys
 
-python -m pytest tests/ -q               # full suite
-python -m pytest tests/test_signal_engine.py::test_reference_week_sep4_2026 -v   # single test
-
-python app/scheduler.py              # local pipeline, blocks forever
-python app/scheduler.py --next       # next 5 scheduled runs, then exit
-python app/scheduler.py --test       # fetch market data once, then exit
-
-python app/journal.py stats          # log | week | month | stats | export
-```
-
-Every fetcher takes manual values so a step can be replayed without waiting for
-the real release:
-
-```bash
 python app/consensus_fetcher.py --crude -1.6 --gasoline 0.5 --distillate -0.3 --previous -2.0
 python app/api_monitor.py --crude 1.25 --cushing 0.2 --gasoline 1.0 --distillate 0.5
 python app/eia_parser.py --once      # single attempt instead of polling
-python app/monitor.py --resume       # pick a trade back up from active_trade.json
+python app/telegram_bot.py --test    # Telegram connectivity check
+python app/telegram_bot.py --prebrief
 ```
 
-## Architecture
+There is currently no `tests/` directory and no `pytest.ini`-driven suite —
+both were removed from the working tree. `requirements.txt` and `pytest.ini`
+still list/configure pytest; if you reintroduce tests, `pytest.ini` already
+excludes anything marked `network` by default (`-m "not network"`).
 
-A Wednesday pipeline of standalone scripts that pass state through JSON files in
-`data/`. There is no framework and no shared process — each script runs alone,
-reads what it needs, writes one file, and exits.
+## Architecture (current, reduced)
+
+Standalone scripts that pass state through JSON files in `data/`. No framework,
+no shared process — each script runs alone, reads what it needs, writes one
+file, and exits.
 
 ```
-consensus_fetcher.py  -> data/consensus.json    ─┐
-api_monitor.py        -> data/api_report.json    ├─> signal_engine.py -> data/signal.json
-eia_parser.py         -> data/eia_actual.json   ─┘                          │
-                                                        telegram_bot.py <───┤
-                                                        monitor.py      <───┘
-                                                            -> data/active_trade.json
-                                                        journal.py -> data/journal.json
-market_data.py        -> data/market_data.json   (independent, daily)
+consensus_fetcher.py  -> data/consensus.json
+api_monitor.py        -> data/api_report.json
+eia_parser.py         -> data/eia_actual.json
+telegram_bot.py       <- data/signal.json (writer no longer exists)
 ```
 
-Three invariants hold this together:
-
-1. **JSON files are the system of record.** PetroCore (the private backend) is a
-   mirror. `PetroCoreClient` never raises and returns `False` when
-   `PETROCORE_URL` is unset — a PetroCore outage must not stop a trade.
-2. **Every script is independently runnable and independently failable.** Each
-   has a `main()` returning an exit code, wrapped in `try/except` that logs the
-   traceback, sends a Telegram alert via `send_error`, and returns 1.
-3. **The rule engine is pure and deterministic.** `signal_engine.generate_signal`
-   takes five floats and returns a `Signal` dataclass — no I/O, no clock, no
-   randomness. Everything else in that file is plumbing around it.
-
-### The AI boundary — do not blur it
-
-`MODEL_MODE` (`groq` | `ollama` | `rule_based`) only selects who writes
-`key_drivers`, `risks` and `reasoning`. The AI never touches `grade`,
-`direction`, `confidence` or the trade recommendation. Any AI failure falls back
-to `rule_based_narrative()` and the signal still ships. If a change would let a
-model output affect a number a trade is sized on, it is wrong.
-
-### Step 0 — the days-to-expiry gate
-
-`app/expiry.py` plus `signal_engine.apply_expiry_gate()`. Below
-`MIN_DAYS_TO_EXPIRY` (3 calendar days, inclusive floor) the week is forced to
-`grade='skip'` with `skip_reason='expiry'`, and the trade recommendation is
-cleared. The inventory read stays on the record.
-
-It is a gate on the engine's output, **not** a sixth rule — `generate_signal()`
-still takes exactly the five inventory numbers, and two tests assert that
-signature. Keep it that way: the reference week is pinned to the pure function.
-
-Three things that are easy to get wrong here:
-
-- **An unknown DTE does not gate.** A missing or stale `data/expiries.json` is an
-  infrastructure failure; failing closed would silently cancel a week over a cache
-  miss. It warns and trades. See `expiry.is_tradeable`.
-- **A deviation skip keeps `skip_reason='deviation'`.** The gate must not relabel
-  a skip the data already caused.
-- MCX crude **options expire 2-4 days before the futures**, which is the whole
-  reason this exists. Do not compute expiry from the futures contract.
-
-The calendar comes from Zerodha's instrument master and is refreshed by
-`market_data.py` on its 09:00 run, so the Wednesday signal path reads a file
-rather than downloading 9MB at 20:00.
-
-### Currency context is informational, deliberately
-
-`app/currency.py` adds the INR fields to a signal — `usd_inr_trend_pct`,
-`currency_direction`, `currency_effect`, `mcx_implied_level`, `strike_atm`,
-`strike_1_otm` — and contributes risk notes. It does **not** touch grade,
-direction or confidence, and `generate_signal()` takes no currency argument at
-all. `tests/test_currency.py` asserts that signature.
-
-The reason is not squeamishness: onshore USD/INR trades 09:00-17:00 IST and TWPR
-holds 20:00-22:30 IST, so the FX market is closed for the whole trade. Over six
-months the rupee flipped the sign of the MCX move versus WTI on 3.2% of days and
-was a median 12% of the move. It decides which strike is ATM and prices the
-overnight gap; it does not decide direction.
-
-If that ever changes, it changes in `docs/twpr_setup_spec.md` and the reference
-week first — adding a sixth step to the confidence formula would move the
-tradeable band off 45-85 and needs a USD/INR figure for 2026-09-04 that the
-reference fixture does not carry.
-
-The sign convention: a weakening rupee (USD/INR **up**) raises the INR price of
-crude, so it amplifies a bullish signal and dampens a bearish one.
-
-`STRIKE_INTERVAL` (₹50) was verified 2026-09-27 against the live chain — all 547
-consecutive gaps across three CRUDEOIL option expiries were exactly 50.0. Re-check
-with `python -m pytest tests/test_strike_interval.py -v -m network`; that file is
-the only one that touches the network and `pytest.ini` deselects it by default, so
-the normal suite stays offline. MCX's own site is Akamai-blocked to both plain
-HTTP and a headless browser, so Zerodha's public instrument master
-(`https://api.kite.trade/instruments`, no auth) is the practical source for
-anything about the live chain.
-
-Also learned from that data and worth remembering: MCX CRUDEOIL **options expire
-2–4 days before the futures**, so "near month" is two different dates, and
-Zerodha's `lot_size` field counts *contracts* (1), not barrels — the 100-barrel
-multiplier in `journal.py` and `monitor.py` comes from the MCX contract spec and
-is correct.
-
-### Signal logic is spec-driven
-
-`docs/twpr_setup_spec.md` is the source of truth for the 5-step rule engine.
-`tests/test_signal_engine.py` enforces it, including the Sep 4 2026 reference
-week (crude deviation +1.209 mb → Grade B bearish, confidence 55).
-
-Changing a threshold means changing the spec, the engine and the tests in the
-same commit. Never the code alone.
-
-Two boundary details that are easy to get backwards:
-
-- The skip zone and the Grade A cutoff are both **inclusive**: exactly ±1.0 mb is
-  a skip, exactly ±1.5 mb is Grade A.
-- Step 2 downgrades A to B and **B is the floor**. Step 5 computes confidence
-  from the grade *after* that downgrade.
-
-### Conventions
-
-- Shared helpers live in `app/common.py` (`DATA_DIR`, `setup_logging`, `env`,
-  `now_utc`, `now_ist`, `week_ending`, `read_json`, `write_json`). Telegram
-  sending lives in `telegram_bot.py` (`send_message`, `send_error`) — other
-  scripts import from there rather than talking to the Bot API.
+- **Shared helpers live in `app/common.py`**: `DATA_DIR`, `setup_logging`,
+  `env`, `now_utc`, `now_ist`, `week_ending`, `read_json`, `write_json`.
 - Scripts import each other as flat modules (`from common import ...`), which
-  works because they all live in `app/` and are run from there. Tests add
-  `app/` to `sys.path`.
-- `setup_logging()` also forces stdout/stderr to UTF-8 — alerts carry `₹` and
-  emoji, and a cp1252 Windows console raises `UnicodeEncodeError` without it. It
-  also silences `httpx`/`httpcore` to WARNING: httpx logs every request URL at
-  INFO, and the Telegram Bot API carries the bot token in its path, so leaving it
-  on writes the token into every log including GitHub Actions run logs.
-- All stock figures are **million barrels**, negative = draw. The EIA API returns
-  thousand barrels, so `eia_parser.py` divides by 1000 at the boundary.
+  works because they all live in `app/` and are run from there.
+- **Read every environment variable through `common.env()`, never
+  `os.getenv`.** `python-dotenv` keeps an inline `# ...` comment as the value
+  when the value is empty, so `EIA_API_KEY=   # free at eia.gov/opendata` sets
+  the key to the comment text. `env()` treats blank and `#`-leading values as
+  unset, turning a confusing downstream 403 into a clean "not set, falling
+  back". A `#` inside a value (not leading) is kept.
+- `setup_logging()` forces stdout/stderr to UTF-8 (alerts carry `₹` and emoji;
+  a cp1252 Windows console raises `UnicodeEncodeError` without it) and
+  silences `httpx`/`httpcore` to WARNING — httpx logs every request URL at
+  INFO, and the Telegram Bot API carries the bot token in its path, so leaving
+  it on writes the token into every log, including GitHub Actions run logs.
+- All stock figures are **million barrels**, negative = draw. The EIA API
+  returns thousand barrels; `eia_parser.py` divides by 1000 at the boundary.
 - Timezones: `now_utc()` for stored timestamps, `now_ist()` for anything
   schedule- or session-related. Never a naive datetime.
-- **Read every environment variable through `common.env()`, never `os.getenv`.**
-  `python-dotenv` keeps an inline `# ...` comment as the value when the value is
-  empty, so `EIA_API_KEY=   # free at eia.gov/opendata` sets the key to the
-  comment text. `env()` treats blank and `#`-leading values as unset, which turns
-  a confusing downstream 403 into a clean "not set, falling back". A `#` inside a
-  value is kept — only a leading one marks a placeholder.
-- `week_ending()` returns the Friday the EIA report covers — the previous Friday
-  from a Tuesday or Wednesday run, which is what every script wants.
-- **`signal_engine.main()` refuses to mix weeks.** The EIA release defines the
-  week; a `consensus.json` for any other week is a hard error, and an
-  `api_report.json` for another week is dropped rather than allowed to move
-  confidence. Deviations subtract consensus from actuals, so a stale consensus
-  produces a plausible number computed across two weeks — for the reference week
-  that is +0.209 instead of +1.209, which silently turns a Grade B trade into a
-  skip. `tests/test_signal_pipeline.py` pins this.
+- `week_ending()` returns the Friday the EIA report covers — the previous
+  Friday from a Tuesday or Wednesday run.
 
 ### Consensus sources
 
@@ -191,72 +81,84 @@ Both scrapers exist and are tried in this order by `consensus_fetcher.py`,
 `api_monitor.py` and `eia_parser.py`, after the explicit source each script
 prefers (CLI flags, or the EIA API) and before the terminal prompt:
 
-1. `tradingeconomics_scraper` — plain HTTP, ~1s. The calendar tables are in the
-   served HTML. This is the primary.
-2. `investing_scraper` — headless Chromium via Playwright, ~15s. investing.com
-   returns 403 to plain HTTP on every route including its JSON endpoints, and
-   Cloudflare challenges every page after the first, so it loads the calendar
-   once and calls the calendar's own data service from inside that session. One
-   request covers every indicator.
+1. `tradingeconomics_scraper.py` — plain HTTP, ~1s. The calendar tables are in
+   the served HTML. This is the primary.
+2. `investing_scraper.py` — headless Chromium via Playwright, ~15s.
+   investing.com returns 403 to plain HTTP on every route including its JSON
+   endpoints, and Cloudflare challenges every page after the first, so it
+   loads the calendar once and calls the calendar's own data service from
+   inside that session.
 
-Both return `None` rather than a partial dict, and both take an optional
-`week` argument; the fetchers pass the week through so a scraper can never
-fetch a different week than the payload is labelled with.
-
-Two traps the parsers exist to avoid:
+Both scrapers expose `fetch_consensus(week=None)`, `fetch_eia_actuals(week=None)`
+and `fetch_api_report(week=None)`, and both return `None` rather than a partial
+dict. Two traps the parsers exist to avoid:
 
 - **Blank cells are positional.** An empty `Actual` marks an unreleased row. A
   parser that filters blanks shifts Previous into Actual and reads last week's
   number as this week's.
 - **Trading Economics' API summary table is undated.** Its "Last" column is
-  always the newest release, so `fetch_api_report` refuses any week that is not
-  the latest released one — otherwise the Cushing, gasoline and distillate legs
-  silently come from a different week than crude.
+  always the newest release, so `fetch_api_report` refuses any week that is
+  not the latest released one.
+
+`investing_scraper.fetch_api_report()` always returns `None`: the US calendar
+carries only the crude leg of the API report, so it cannot fill the four
+fields `api_monitor.py` requires. Trading Economics is the only source for
+that report. `investing_scraper.fetch_api_crude_only()` is for cross-checking
+only, not part of the fetcher contract.
+
+Neither scraper carries the refinery utilization percentage, so
+`refinery_util_pct` is null on a scraped week.
 
 `eia_parser.py` keeps the EIA API first when `EIA_API_KEY` is set — it is the
 publisher — and falls back to the scrapers otherwise, so a Wednesday can run
 without a key. The API derives stock *changes* from two weekly levels in
-thousand barrels; the scrapers publish the changes directly in million barrels.
-Neither scraper carries the refinery utilization percentage, so
-`refinery_util_pct` is null on a scraped week. Nothing in the signal engine reads
-it, which is why it is not in `eia_parser.REQUIRED_FIELDS`.
-
-`investing_scraper.fetch_api_report()` always returns `None`: the US calendar
-carries only the crude leg of the API report, so it cannot fill the four fields
-`api_monitor` requires. Trading Economics is the only source for that report.
-`fetch_api_crude_only()` is there for cross-checking and is not part of the
-fetcher contract.
-
-The two sources agree exactly on actuals. Crude *consensus* differs by ~0.1 mb
-(TE -0.6 vs investing -0.7 for week ending 2026-09-18) because they poll
-different survey panels. That is expected, not a bug.
+thousand barrels (`STOCK_SERIES` in `eia_parser.py`); the scrapers publish the
+changes directly in million barrels.
 
 Running the scrapers needs `python -m playwright install chromium` once; the
 consensus and api_monitor workflows do it in CI.
 
-### GitHub Actions runs the same scripts
+### Telegram delivery
 
-The four workflows in `.github/workflows/` run the same commands on cron and then
-**commit `data/` back to the repo**. The runner is ephemeral, so the committed
-JSON is how Wednesday's signal sees Tuesday's consensus. `data/active_trade.json`,
-`journal.json` and `journal_export.csv` stay local and gitignored.
+`telegram_bot.py` is also the shared notifier — `send_message` / `send_error`
+are imported by other scripts rather than talking to the Bot API directly.
+Messages are sent as plain text (no `parse_mode`) so premium figures and
+underscores never need escaping. `format_signal()` renders a `signal.json`
+dict (grade/direction/confidence/expiry/strike/drivers/risks) into the
+Wednesday alert, including a skip-week and an expiry-skip variant — but
+nothing in the current tree writes `data/signal.json`.
 
-## Not wired up
+### GitHub Actions
 
-- Angel One SmartAPI. `monitor.py:read_current_premium` prompts for the premium
-  each minute; that function is the single seam to replace.
-- The EIA **stock** series ids in `eia_parser.py` are verified (2026-09-27, all
-  four legs matched the scrapers exactly for week ending 2026-09-18). EIA's
-  **futures** series `RCLC1`/`RCLC2` are dead: they exist, return HTTP 200, and
-  stopped publishing on 2024-04-05, so a later `start` yields zero rows with no
-  error. Do not reinstate them. `market_data.py` takes the WTI curve from dated
-  NYMEX contracts instead — expired ones 404, which is how the live front two
-  identify themselves, and `_check_front_month` warns if M1 drifts more than 1%
-  from the `CL=F` continuous.
-- PetroCore's `/api/v1/twpr/eia-report` constrains `source` to
-  `eia_api`, `tankertrackers+eia_api` or `wbos`, so a scraped week is rejected
-  with a 422. The POST is non-blocking and the JSON file still holds the week, but
-  PetroCore will have no EIA row for it until that enum accepts
-  `tradingeconomics.com` and `investing.com`. The other endpoints take free-form
-  sources. Do not paper over this by sending `eia_api` for scraped data —
-  provenance in the audit trail matters more than a green POST.
+Four workflows in `.github/workflows/` run on cron and **commit `data/` back to
+the repo** — the runner is ephemeral, so committed JSON is how Wednesday's
+signal path sees Tuesday's consensus. `data/active_trade.json`,
+`journal.json` and `journal_export.csv` stay local and gitignored (their
+producers, `monitor.py`/`journal.py`, are currently removed).
+
+- `twpr_consensus.yml` — Tue 19:00 IST — `consensus_fetcher.py --no-prompt`
+- `twpr_api_monitor.yml` — Wed 01:45 IST — `api_monitor.py --no-prompt`
+- `twpr_eia_signal.yml` — Wed 20:00 IST — prebrief, `eia_parser.py`,
+  `signal_engine.py` (missing), `telegram_bot.py`
+- `twpr_market_data.yml` — 09:00 IST Mon–Fri — `market_data.py` (missing)
+
+All four use `concurrency: group: twpr-data` so they can't race on the `data/`
+commit.
+
+## What's gone from the working tree (uncommitted)
+
+Present in `git log` but deleted locally and not yet restored or replaced:
+
+- `app/signal_engine.py` (emptied, not deleted — the 5-step rule engine),
+  `app/expiry.py` (days-to-expiry gate), `app/currency.py` (INR context),
+  `app/journal.py`, `app/market_data.py`, `app/monitor.py`,
+  `app/petrocore_client.py`, `app/scheduler.py`
+- `docs/twpr_setup_spec.md`, `docs/manual_testing.md`,
+  `docs/claude_code_twpr_prompt.md`
+- everything under `tests/`
+- `README.md` content (file still exists, now empty)
+
+`data/reference_week.json` still holds the pinned reference week (week ending
+2026-09-04: crude deviation +1.209 mb → Grade B bearish, confidence 55,
+1-OTM put, size 1.5%) — useful if the engine is rebuilt, since it's the number
+that must reproduce exactly.
