@@ -23,17 +23,16 @@ Run from the repo root:
 import argparse
 import logging
 import os
-import sys
 
-from app.utils.common import DATA_DIR, now_ist, now_utc, poll, setup_logging, write_json
+from app.utils.common import API_REPORT_FILE, now_ist, now_utc, poll, setup_logging, write_json
 from app.utils.racer import race
+from app.utils.telegram import send_exception
 from app.scraper.sites.tradingeconomics import parse_related_table
 from app.scraper.sources import SOURCE_NAMES, scraper_for, slug_for
 from app.scraper.utils.calendar import current_release, row_for_release
 
 logger = logging.getLogger("twpr.api_monitor")
 
-API_REPORT_FILE = DATA_DIR / "api_report.json"
 SITES = ("tradingeconomics", "investing")
 FIELDS = ("crude", "cushing", "gasoline", "distillate")  # crude first: it anchors the release date
 LEGS = FIELDS[1:]
@@ -140,8 +139,9 @@ def main(argv=None):
             payload["api_gasoline_mb"], payload["api_distillate_mb"],
         )
         return 0
-    except Exception:  # noqa: BLE001 - top-level guard
+    except Exception as exc:  # noqa: BLE001 - top-level guard
         logger.exception("api_monitor failed")
+        send_exception("api_monitor.py", exc)
         return 1
 
 

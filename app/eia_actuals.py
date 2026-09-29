@@ -25,16 +25,15 @@ Run from the repo root:
 import argparse
 import logging
 import os
-import sys
 
-from app.utils.common import DATA_DIR, now_ist, now_utc, poll, setup_logging, write_json
+from app.utils.common import EIA_ACTUALS_FILE, now_ist, now_utc, poll, setup_logging, write_json
 from app.utils.racer import race
+from app.utils.telegram import send_exception
 from app.scraper.sources import SOURCE_NAMES, scraper_for, slug_for
 from app.scraper.utils.calendar import current_release, row_for_release
 
 logger = logging.getLogger("twpr.eia_actuals")
 
-EIA_ACTUALS_FILE = DATA_DIR / "eia_actuals.json"
 SITES = ("tradingeconomics", "investing")
 LEGS = ("crude", "cushing", "gasoline", "distillate")  # crude first: it anchors the release date
 RACE_TIMEOUT_S = 420  # investing.com needs one paced browser session per leg
@@ -160,8 +159,9 @@ def main(argv=None):
             f"{refinery:+.1f}%" if refinery is not None else "n/a",
         )
         return 0
-    except Exception:  # noqa: BLE001 - top-level guard
+    except Exception as exc:  # noqa: BLE001 - top-level guard
         logger.exception("eia_actuals failed")
+        send_exception("eia_actuals.py", exc)
         return 1
 
 

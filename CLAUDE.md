@@ -21,12 +21,11 @@ history as "current" anymore; it's only recoverable via `git show
 `.gitkeep`.
 
 **What exists now** (rebuilt after that cleanup): `app/scraper/` (the TE and
-investing.com scrapers), `app/consensus_fetcher.py`, `app/api_monitor.py` and
-`app/eia_actuals.py` (pipeline scripts built on them), `app/utils/racer.py` (the shared race), `app/utils/common.py`
-(`DATA_DIR`, `setup_logging`, `now_utc`, `now_ist`, `write_json`), and `tests/`.
-Everything else the old pipeline had (signal engine, Telegram,
-expiry/currency, journal, CI workflows) is **not present** until rebuilt — don't assume
-`env()`, `read_json`, `signal_engine.py` etc. exist.
+investing.com scrapers), the pipeline scripts `app/consensus_fetcher.py`,
+`app/api_monitor.py`, `app/eia_actuals.py`, `app/signal_engine.py` and `app/telegram_bot.py`, the helpers in
+`app/utils/` (`racer.py`, `common.py`, `telegram.py`), and `tests/`. Still **not
+present** from the old pipeline: the pre-brief message, expiry/currency
+strike logic, monitor/journal/scheduler, PetroCore, CI workflows.
 
 **Naming rule:** TE's "Consensus" and investing.com's "Forecast" are the same
 figure and are called **`consensus`** everywhere in this app (`consensus`,
@@ -58,6 +57,12 @@ python -m app.api_monitor --date 22-09-2026 --once # replay a specific release
 python -m app.eia_actuals                           # today's EIA report, polls until it lands
 python -m app.eia_actuals --once                    # single attempt
 python -m app.eia_actuals --date 23-09-2026 --once  # replay a specific release
+
+python -m app.signal_engine                        # data/*.json -> data/signal.json
+python -m app.signal_engine --allow-stale          # replay input files older than 2 days
+
+python -m app.telegram_bot                         # send data/signal.json to Telegram
+python -m app.telegram_bot --allow-stale           # replay an old signal (stamped REPLAY)
 
 python -m pytest tests -q                          # offline suite (default)
 python -m pytest tests -m network -k tradingeconomics   # live URL health check
@@ -189,8 +194,90 @@ Released Wed 10:30 ET (20:00 IST); polls every 60 s for up to 90 min unless `--o
   today's UTC date, and it is refused if more than 1 day old. Without this, in a
   Thursday-delayed week, Wednesday's run would return LAST week's already-printed
   report as fresh. `api_monitor` uses the same guard. An explicit `--date` bypasses it.
+- **The data contract has one home: `common.py`** (`CONSENSUS_FILE`, `API_REPORT_FILE`,
+  `EIA_ACTUALS_FILE`, `SIGNAL_FILE`). Every producer and the engine import these; **never
+  spell `consensus.json` etc. in code** (docstrings may mention them). A rename once
+  (`eia_actual` -> `eia_actuals`) would otherwise leave the engine reading a dead name,
+  failing "file not found" at 20:02 on a Wednesday.
+  `tests/test_pipeline_wiring.py` fails on any code string literal naming a data file
+  outside `common.py`, and asserts producer and consumer share the same `Path` object.
+- **Every pipeline script alerts Telegram on failure and stays silent on success**:
+  `consensus_fetcher`, `api_monitor` and `eia_actuals` call
+  `telegram.send_exception("<script>.py", exc)` in their top-level guard (message =
+  `Type: text`, cut to 1500 chars; race errors carry the per-site reasons), then exit 1
+  with nothing written. `signal_engine` sends its own `InputError` alerts. This includes a
+  polling script exhausting its window (eia_actuals: 90 min) — the case that used to fail
+  unnoticed. `send_*` never raises and logs the text if Telegram is unset. Only failures
+  alert; success alerts are not built.
+- `common.env/fmt/fmt_ts/is_stale` (placeholder-safe env reads: blank or `#`-leading = unset;
+  DD-MM-YYYY dates), `setup_logging` silences httpx (the Telegram token is in its URL).
 - `common.poll(attempt, once, interval_s, timeout_s, log)` retries on `RuntimeError`
   ("not there yet") and lets every other exception propagate; both polling scripts use it.
+
+### `app/signal_engine.py` — the signal
+
+Reads `consensus.json` + `api_report.json` + `eia_actuals.json`, applies the 5-step
+rules, writes `data/signal.json` (`inputs` / `calculations` / `signal` /
+`expected_move` / `analysis` / `model_used`). No scraping. Telegram is used for
+**errors only** (`utils/telegram.py`, never raises; success alerts are not built).
+
+- **Pure rule functions** (`calculate_deviations`, `apply_grade_logic`,
+  `apply_cushing_adjustment`, `check_products`, `check_api_alignment`,
+  `calculate_confidence`, `get_trade_recommendation`, `get_expected_move`) take plain
+  values — no I/O, clock or randomness. Boundaries are inclusive: exactly +/-1.0 mb is a
+  skip, exactly +/-1.5 is Grade A. Cushing downgrades A->B, B is the floor, and
+  confidence (base A 75 / B 55, +/-5 Cushing, +/-5 API, clamp 40-85) uses the grade
+  **after** the downgrade. A skip has confidence 0, no trade, and `null` (not
+  false/0) for `cushing_contradicts` / `products_oppose` / `api_aligns`.
+- **The AI boundary:** Groq writes only `analysis`. It never touches grade, direction,
+  confidence or the trade; any failure ships the signal with `analysis: ""`,
+  `model_used: "rule_based"` (a test proves a lying model changes nothing).
+- **`check_products` uses the same-sign rule** (bearish: BOTH product deviations
+  > +2.0; bullish: BOTH < -2.0). The original prompt's formula text was the mirror
+  image and contradicted its own sample output, the reference week
+  (`products_strongly_oppose: true` for +2.669/+2.787 bearish) and the old engine;
+  the user chose the same-sign rule. A flag only, never changes the grade.
+- **Release-date validation:** consensus and EIA actuals must have the **same**
+  `release_date`; the API report's date is the **Tuesday before** (0-3 days earlier),
+  so "all three equal" would always fail on real data. Files older than 2 days are
+  refused (API: 5) unless `--allow-stale`. `release_date` missing/invalid, bad JSON, a
+  missing file, or a missing mandatory field (`crude_consensus_mb`, `crude_change_mb`,
+  `api_crude_mb`) -> Telegram error + exit 1, nothing written. Optional fields become
+  `null` and their checks `None`.
+- **`inputs.refinery_util_change_pct`, not `refinery_util_pct`:** the level no longer
+  exists in `eia_actuals.json` (see eia_actuals), so the change replaces it in `inputs`
+  and in the Groq prompt.
+- **USD/INR** comes from `yfinance` (`INR=X`, 10 s timeout on a daemon thread) or the
+  fallback 84.0; a quote outside 50-150 is treated as bad data. `usd_inr_source` records
+  which. Live 29-09-2026: 95.96, so MCX moves scale accordingly.
+- **Groq caveats (found live):** the spec's default model `llama-3.3-70b-versatile` is
+  **404 for this account**; available chat models are `qwen/qwen3.8-27b` (works),
+  `openai/gpt-oss-20b/120b` (reasoning models: they spend `max_tokens=150` on hidden
+  reasoning and return empty content, so the narrative silently falls back) and
+  `allam-2-7b`. Set `GROQ_MODEL` in `.env` (it is blank today). The spec truncates the
+  reply to **200 chars** (`ANALYSIS_MAX_CHARS`), which cuts the 3-sentence narrative
+  mid-sentence; the model also invented a "$0.50 drop" target absent from the inputs.
+  The narrative is display-only, but do not trust its numbers.
+- Input `load_inputs(data_dir=None)` resolves `DATA_DIR` at call time; an import-time
+  default silently ignores test patching and reads the real `data/`.
+
+### `app/telegram_bot.py` — the success alert
+
+Sends `data/signal.json` to Telegram (`format_signal` is pure and tested): grade, direction,
+crude deviation with actual vs consensus, Cushing / API status, the "products strongly
+oppose" flag when true, the trade (option, strike, size, confidence), the expected WTI move
+with its MCX/INR equivalent, and the narrative. A skip week sends "NO TRADE" and none of the
+trade detail; missing optional data reads `N/A`, not a crash. Runs after `signal_engine`.
+
+- **It refuses a stale signal.** If the engine failed, `signal.json` still holds LAST week's
+  trade; sending it as live could get someone to trade a dead setup. A signal older than 2
+  days -> error alert + exit 1. `--allow-stale` sends it anyway, first line
+  `REPLAY - data is N days old, NOT a live signal`. Missing/corrupt file -> error alert too.
+- Verified live: Telegram accepted a test alert and a replay of the 23-09 signal (607 chars).
+- Known cosmetic: the narrative is cut at `ANALYSIS_MAX_CHARS` (200), so it shows up
+  mid-word in the message ("...risk to thi"). Raise the constant in `signal_engine.py`.
+- Windows consoles are cp1252: never `print()` this text (emoji raise `UnicodeEncodeError`);
+  the script only logs, and `setup_logging` forces UTF-8.
 
 ### `app/scraper/browser.py`
 

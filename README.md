@@ -94,6 +94,28 @@ python -m app.eia_actuals --once
 python -m app.eia_actuals --date 23-09-2026 --once  # replay a release
 ```
 
+## Signal engine
+
+Turns the three data files into `data/signal.json`: crude deviation vs consensus,
+grade (A / B / skip), direction, confidence, the option to buy and its size, and the
+expected WTI / MCX move. The rules are deterministic; the optional Groq paragraph is
+narrative only and never affects the trade.
+
+```bash
+python -m app.signal_engine                # data/consensus.json + api_report.json + eia_actuals.json
+python -m app.signal_engine --allow-stale  # replay older files
+```
+
+Needs `GROQ_API_KEY` (and a `GROQ_MODEL` your account can use) for the narrative,
+and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for error alerts. Both are optional.
+
+## Telegram alerts
+
+`python -m app.telegram_bot` sends the signal to your Telegram chat. It refuses a
+signal older than 2 days (so a failed engine run can't resend last week's trade);
+`--allow-stale` sends a replay clearly marked as one. Every pipeline script also
+alerts Telegram if it fails. Configure `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
+
 ## Where the URLs live
 
 All slugs are in `app/scraper/sources.py`, keyed by indicator name (`eia_crude`,

@@ -1,6 +1,7 @@
 """Shared helpers for the pipeline scripts."""
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -9,6 +10,16 @@ from zoneinfo import ZoneInfo
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"  # <repo>/data (this file is app/utils/common.py)
 IST = ZoneInfo("Asia/Kolkata")
+ROOT = DATA_DIR.parent
+
+# The pipeline's data contract: each file has ONE producer and is read by the next
+# stage. Import these; never re-spell a file name (a rename would silently split them).
+CONSENSUS_FILE = DATA_DIR / "consensus.json"      # consensus_fetcher -> signal_engine
+API_REPORT_FILE = DATA_DIR / "api_report.json"    # api_monitor       -> signal_engine
+EIA_ACTUALS_FILE = DATA_DIR / "eia_actuals.json"  # eia_actuals       -> signal_engine
+SIGNAL_FILE = DATA_DIR / "signal.json"            # signal_engine
+DATE_FORMAT = "%d-%m-%Y"
+TIMESTAMP_FORMAT = "%d-%m-%Y %H:%M"
 
 
 def setup_logging():
@@ -21,6 +32,10 @@ def setup_logging():
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    # httpx logs every request URL at INFO, and the Telegram Bot API carries the bot
+    # token in its path - left on, the token lands in every log (incl. CI run logs).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def now_utc():
@@ -49,3 +64,39 @@ def poll(attempt, once, interval_s, timeout_s, log):
                 raise
             log.info("not available yet (%s) - retrying in %ds", exc, interval_s)
             time.sleep(interval_s)
+
+
+def env(name, default=None):
+    """An environment variable, treating a placeholder as unset.
+
+    python-dotenv keeps an inline `# ...` comment as the value when the value is
+    empty (`GROQ_API_KEY=   # free at ...` becomes the comment text), which then
+    fails as a confusing 401. Blank or `#`-leading values count as unset.
+    """
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return default if not value or value.startswith("#") else value
+
+
+def fmt(day):
+    """A date -> DD-MM-YYYY."""
+    return day.strftime(DATE_FORMAT)
+
+
+def fmt_ts(moment):
+    """A datetime -> DD-MM-YYYY HH:MM."""
+    return moment.strftime(TIMESTAMP_FORMAT)
+
+
+def parse_release_date(text):
+    """DD-MM-YYYY -> date; ValueError if it isn't one."""
+    return datetime.strptime(text, DATE_FORMAT).date()
+
+
+def is_stale(release_date, max_age_days=2, today=None):
+    """True if the DD-MM-YYYY `release_date` is more than `max_age_days` before `today`
+    (default: today, IST)."""
+    today = today or now_ist().date()
+    return (today - parse_release_date(release_date)).days > max_age_days

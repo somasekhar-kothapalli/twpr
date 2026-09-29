@@ -6,7 +6,6 @@ from bs4 import BeautifulSoup
 
 from app.api_monitor import RELATED_NAMES, fetch_api_report, legs_from_snapshot
 from app.scraper.sites.tradingeconomics import parse_related_table
-from app.scraper.sources import slug_for
 
 TODAY_AFTER = datetime.date(2026, 9, 23)   # the 22-09 report is due and printed
 TODAY_BEFORE = datetime.date(2026, 9, 29)  # 29-09 report is due but not printed yet

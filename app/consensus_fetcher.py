@@ -17,16 +17,15 @@ Run from the repo root:
 import argparse
 import logging
 import os
-import sys
 
-from app.utils.common import DATA_DIR, now_ist, setup_logging, write_json
+from app.utils.common import CONSENSUS_FILE, now_ist, setup_logging, write_json
 from app.utils.racer import race
+from app.utils.telegram import send_exception
 from app.scraper.sources import SOURCE_NAMES, scraper_for, slug_for
-from app.scraper.utils.calendar import format_date, pending_row, row_for_release
+from app.scraper.utils.calendar import pending_row, row_for_release
 
 logger = logging.getLogger("twpr.consensus_fetcher")
 
-CONSENSUS_FILE = DATA_DIR / "consensus.json"
 SITES = ("tradingeconomics", "investing")
 INDICATORS = ("crude", "gasoline", "distillate")  # crude first: it carries crude_previous_mb
 RACE_TIMEOUT_S = 480  # investing.com needs one paced browser session per indicator
@@ -108,8 +107,9 @@ def main(argv=None):
             payload["distillate_consensus_mb"], payload["crude_previous_mb"],
         )
         return 0
-    except Exception:  # noqa: BLE001 - top-level guard
+    except Exception as exc:  # noqa: BLE001 - top-level guard
         logger.exception("consensus_fetcher failed")
+        send_exception("consensus_fetcher.py", exc)
         return 1
 
 
