@@ -5,160 +5,225 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 TWPR (The Weekly Petroleum Report) — a systematic weekly options setup on MCX
-CrudeOil, the first setup in the TradeDesk platform. **Real money trades on this
-repo's output.** Reliability and correctness over cleverness.
+CrudeOil, the first setup in the TradeDesk platform. **Real money is meant to
+trade on this repo's output**, once there's a pipeline again — see below.
 
 Options **buyer only**, never a seller. Max 2% of capital on a Grade A trade.
 
-**The repo is mid-rewrite.** `feature/v0.1` currently has the rule engine, the
-expiry gate, the currency module, the monitor/journal/scheduler layer, the
-PetroCore client, and the entire test suite and docs removed from the working
-tree (uncommitted, not staged). What's left is the three Tuesday/Wednesday data
-fetchers, the two scrapers, and Telegram delivery. `signal_engine.py` exists as
-an empty file and `telegram_bot.py` still expects to read `data/signal.json`
-from it — that wiring is currently broken. The GitHub Actions workflows still
-invoke `app/market_data.py` and `app/signal_engine.py`, which no longer exist /
-no longer do anything. Don't assume the architecture described in old commits
-or in `docs/` (also removed) is live; check `git log` and what's actually on
-disk before relying on either.
+## Current state: gutted, mid-rebuild
+
+Commit `d252907` ("Clean up for building v0.1", 2026-09-29) deleted the entire
+previous pipeline — every fetcher, the rule engine, the expiry gate, the
+currency module, monitor/journal/scheduler, the PetroCore client, all tests,
+all docs, and all four GitHub Actions workflows. None of that exists in git
+history as "current" anymore; it's only recoverable via `git show
+<earlier-sha>:<path>` if it's ever needed as reference. `data/` holds only a
+`.gitkeep`.
+
+**What actually exists in `app/` right now is one thing**: `app/scraper/`, a
+browser-automation scraper pair for TradingEconomics and investing.com,
+ported in from a sibling project (`WB-OS`) as the seed for rebuilding the
+consensus/actuals fetchers. It has no caller yet — nothing in this repo reads
+its output, writes a `data/*.json` file, or talks to Telegram. Treat any
+mention of `common.py`, `signal_engine.py`, `consensus_fetcher.py`, the
+`env()` helper, etc. in old commit messages or in
+memory/history as **not present** until they're rebuilt.
 
 ## Commands
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env                     # then fill in the keys
+python -m playwright install chromium   # one-off, needed for both scrapers
 
-python app/consensus_fetcher.py --crude -1.6 --gasoline 0.5 --distillate -0.3 --previous -2.0
-python app/api_monitor.py --crude 1.25 --cushing 0.2 --gasoline 1.0 --distillate 0.5
-python app/eia_parser.py --once      # single attempt instead of polling
-python app/telegram_bot.py --test    # Telegram connectivity check
-python app/telegram_bot.py --prebrief
+# Both must run with -m — they use relative imports (`from ..browser import ...`),
+# which only resolve under package context. Running them as a bare file path
+# (`python app/scraper/sites/x.py`) fails with ImportError: attempted relative
+# import with no known parent package. Either form works:
+python -m app.scraper.sites.tradingeconomics    # from the repo root
+python -m app.scraper.sites.investing
+# or: cd app && python -m scraper.sites.investing
 ```
 
-There is currently no `tests/` directory and no `pytest.ini`-driven suite —
-both were removed from the working tree. `requirements.txt` and `pytest.ini`
-still list/configure pytest; if you reintroduce tests, `pytest.ini` already
-excludes anything marked `network` by default (`-m "not network"`).
+The `__init__.py` files in `app/scraper/` and `app/scraper/sites/` are load-bearing
+for the `-m scraper...` form; if the directory gets recreated and they vanish,
+that command breaks (`app/` itself needs none — it's an implicit namespace package).
 
-## Architecture (current, reduced)
+There is no `tests/` directory and no test suite currently. `pytest.ini` is
+still present and still excludes `network`-marked tests by default
+(`-m "not network"`), but nothing in the repo defines any tests to run.
 
-Standalone scripts that pass state through JSON files in `data/`. No framework,
-no shared process — each script runs alone, reads what it needs, writes one
-file, and exits.
+## Architecture
+
+### `app/scraper/browser.py`
+
+Shared Playwright helpers, both sites build on this:
+
+- `browser_session()` — a context manager yielding one Playwright page;
+  reuse it across multiple `.goto()` calls instead of opening a fresh browser
+  per page fetch.
+- `goto(page, url, wait_selector=None, ...)` — navigates on
+  `domcontentloaded` (not `networkidle` — ad/analytics-heavy pages often
+  never go idle) and waits for `wait_selector` as the real readiness signal.
+  On an HTTP 4xx/5xx it reloads up to `RELOAD_RETRIES` (2) times, 5s apart,
+  then raises `RuntimeError("... returned HTTP <status> (blocked or
+  rate-limited)")`. The fail-fast matters: without it a 403 shows up as a
+  30s `wait_for_selector` timeout that looks like a selector bug.
+- `render_page()` / `render_html()` — one-off single-page variants built on
+  `browser_session()`, for a caller that only needs one fetch.
+
+**`browser_session()` launches with `headless=False`.** That's a real,
+visible Chromium window with `slow_mo=150` and
+`--disable-blink-features=AutomationControlled` — deliberate anti-bot-detection
+choices carried over from `WB-OS`, not an oversight. It means this cannot run
+on a headless CI runner (GitHub Actions, a server without a display) without
+something like `xvfb` in front of it. If the old GitHub Actions workflows get
+rebuilt around this scraper, that's the first thing to solve.
+
+### `app/scraper/sources.py` — where the URLs live
+
+One registry, no URLs anywhere else. `INDICATORS[indicator][site] = slug`
+(slugs relative to the site's `base_url`), `SITES[site] = scraper class`,
+plus `slug_for(indicator, site)` and `scraper_for(site)`. A missing entry means
+that site doesn't carry / we haven't verified that indicator (e.g. no Cushing
+on investing.com, no refinery utilisation on TE) — callers skip it.
+
+- **Adding a site:** subclass `CalendarScraper` (see below), add it to `SITES`,
+  add its slug to each indicator it carries. No caller changes.
+- **Fixing a moved URL:** edit `INDICATORS` only.
+- **Health check:** `python -m pytest tests/test_sources.py -m network -k tradingeconomics`
+  walks every registered slug and fails if a page stops returning data. Run
+  investing.com entries one at a time (`-k "eia_gasoline and investing"`) — it
+  403s on back-to-back sessions. The offline tests in the same file run by default.
+- **investing.com events can be dead**: API Cushing/gasoline/distillate (1656/657/1035)
+  return rows from 2016/2022 with no error, so they are deliberately absent from the
+  registry. The network health test asserts the newest released row is <= 21 days old.
+  Always check `release_date` freshness on a new slug. TE's `api_gasoline` and
+  `api_distillate` both read -2.16 for the latest week (suspiciously equal) and could
+  not be cross-checked against investing.com — treat as unverified.
+- investing.com slugs are `<event-name>-<event-id>` (e.g. `...-75`); TE slugs are
+  `united-states/<indicator>`.
+- Some TE pages (API Cushing/gasoline/distillate) have **no calendar table**, only
+  the stats table: `fetch_page` returns `calendar_rows: None` with `stats` filled,
+  so `fetch_release` returns `None` for them (no dated rows). Use `fetch_page(...)["stats"]`
+  for the latest values. `eia_refinery` values are percentages, not million barrels
+  (the `actual_mb`-style names don't apply); TE has no refinery page.
+
+### `app/scraper/utils/base.py` — `CalendarScraper` (the response contract)
+
+Both site scrapers subclass this and only supply `base_url`, `wait_selector`,
+`parse_rows(soup)` and `parse_stats(soup, rows)`. **The response shape lives
+here, so the two sites cannot drift** — do not re-add `fetch_page` / context
+manager / `fetch_release` boilerplate to a site file, and do not change the
+shape in one site only:
 
 ```
-consensus_fetcher.py  -> data/consensus.json
-api_monitor.py        -> data/api_report.json
-eia_parser.py         -> data/eia_actual.json
-telegram_bot.py       <- data/signal.json (writer no longer exists)
+fetch_page(slug) -> {"calendar_rows": [row, ...] | None,
+                     "stats": {"actual_mb", "forecast_mb", "previous_mb"}}   # or None on failure
+row = {"release_date": "DD-MM-YYYY", "time": "08:00 PM" (IST),
+       "actual"/"forecast"/"previous": float million barrels | None}
 ```
 
-- **Shared helpers live in `app/common.py`**: `DATA_DIR`, `setup_logging`,
-  `env`, `now_utc`, `now_ist`, `week_ending`, `read_json`, `write_json`.
-- Scripts import each other as flat modules (`from common import ...`), which
-  works because they all live in `app/` and are run from there.
-- **Read every environment variable through `common.env()`, never
-  `os.getenv`.** `python-dotenv` keeps an inline `# ...` comment as the value
-  when the value is empty, so `EIA_API_KEY=   # free at eia.gov/opendata` sets
-  the key to the comment text. `env()` treats blank and `#`-leading values as
-  unset, turning a confusing downstream 403 into a clean "not set, falling
-  back". A `#` inside a value (not leading) is kept.
-- `setup_logging()` forces stdout/stderr to UTF-8 (alerts carry `₹` and emoji;
-  a cp1252 Windows console raises `UnicodeEncodeError` without it) and
-  silences `httpx`/`httpcore` to WARNING — httpx logs every request URL at
-  INFO, and the Telegram Bot API carries the bot token in its path, so leaving
-  it on writes the token into every log, including GitHub Actions run logs.
-- All stock figures are **million barrels**, negative = draw. The EIA API
-  returns thousand barrels; `eia_parser.py` divides by 1000 at the boundary.
-- Timezones: `now_utc()` for stored timestamps, `now_ist()` for anything
-  schedule- or session-related. Never a naive datetime.
-- `week_ending()` returns the Friday the EIA report covers — the previous
-  Friday from a Tuesday or Wednesday run.
+`calendar_rows` is `None` (never `[]`) when there are no rows; `stats` always has
+all three keys. Both sites take `stats` from the latest released calendar row
+(TE's separate stats table rounds — 2.97 vs 2.969 — so it is only a fallback for
+pages with no calendar). A page that never shows its table returns `None` with a
+one-line warning after `timeout_ms` (default 30s); TE returns HTTP 200 for a bad
+slug, so a missing table can't be told apart from a slow render.
+`page_gap_s` spaces out page loads per instance (investing.com defaults to 10s;
+TE 0).
 
-### Consensus sources
+### `app/scraper/utils/calendar.py` — the shared row contract
 
-Both scrapers exist and are tried in this order by `consensus_fetcher.py`,
-`api_monitor.py` and `eia_parser.py`, after the explicit source each script
-prefers (CLI flags, or the EIA API) and before the terminal prompt:
+Both scrapers are meant to return **identical rows** except `forecast`
+(the two sites poll different analyst panels; e.g. crude consensus -0.6 on TE
+vs -0.7 on investing.com for the 23-09-2026 release). This module is what keeps
+them identical — put any new parsing here, not in a site file:
 
-1. `tradingeconomics_scraper.py` — plain HTTP, ~1s. The calendar tables are in
-   the served HTML. This is the primary.
-2. `investing_scraper.py` — headless Chromium via Playwright, ~15s.
-   investing.com returns 403 to plain HTTP on every route including its JSON
-   endpoints, and Cloudflare challenges every page after the first, so it
-   loads the calendar once and calls the calendar's own data service from
-   inside that session.
+- Row shape: `{release_date: 'DD-MM-YYYY' str, time: IST 'HH:MM AM/PM' str,
+  actual / forecast / previous: float million barrels or None}`.
+- `gmt_to_ist()`, `to_mb_suffixed()` (`'-1.6M'`/`'250K'` → float).
+- `row_for_release(rows, release_date=None)` — the row whose `release_date`
+  matches exactly, else `None`; no date = latest released row.
+- `DATE_FORMAT = "%d-%m-%Y"` is the default for every date the scrapers take or
+  return (`parse_date` / `format_date`). ISO `YYYY-MM-DD` input is also accepted
+  but output is always DD-MM-YYYY. Compare dates as `date` objects, never as
+  strings — DD-MM-YYYY does not sort chronologically.
 
-Both scrapers expose `fetch_consensus(week=None)`, `fetch_eia_actuals(week=None)`
-and `fetch_api_report(week=None)`, and both return `None` rather than a partial
-dict. Two traps the parsers exist to avoid:
+Lookup is by **release date only**, deliberately: investing.com exposes no
+"week ending" field, so mapping dates to reporting weeks would make the two
+scrapers disagree. Callers pass the real release date (usually a Wednesday for
+EIA, Tuesday for API, shifted by holidays — e.g. Thu 10-09-2026). A week-ending
+Friday returns `None`.
 
-- **Blank cells are positional.** An empty `Actual` marks an unreleased row. A
-  parser that filters blanks shifts Previous into Actual and reads last week's
-  number as this week's.
-- **Trading Economics' API summary table is undated.** Its "Last" column is
-  always the newest release, so `fetch_api_report` refuses any week that is
-  not the latest released one.
+Both scraper classes expose `fetch_release(slug, release_date=None)` =
+`fetch_page` + `row_for_release`. An upcoming release still matches (its
+`actual` is `None`), so check `actual` before treating it as released.
+Both `python -m` runners take `--slug` and `--date` (`utils/cli.py`).
 
-`investing_scraper.fetch_api_report()` always returns `None`: the US calendar
-carries only the crude leg of the API report, so it cannot fill the four
-fields `api_monitor.py` requires. Trading Economics is the only source for
-that report. `investing_scraper.fetch_api_crude_only()` is for cross-checking
-only, not part of the fetcher contract.
+Known unavoidable differences between the two sites: `forecast` (different
+panels, incl. `stats.forecast_mb`) and the number of history rows (TE shows ~3,
+investing.com ~10).
 
-Neither scraper carries the refinery utilization percentage, so
-`refinery_util_pct` is null on a scraped week.
+### `app/scraper/sites/tradingeconomics.py` — `TradingEconomicsScraper`
 
-`eia_parser.py` keeps the EIA API first when `EIA_API_KEY` is set — it is the
-publisher — and falls back to the scrapers otherwise, so a Wednesday can run
-without a key. The API derives stock *changes* from two weekly levels in
-thousand barrels (`STOCK_SERIES` in `eia_parser.py`); the scrapers publish the
-changes directly in million barrels.
+`fetch_page(slug)` (e.g. `"united-states/crude-oil-stocks-change"`) →
+`{"calendar_rows": [...] | None, "stats": {"actual_mb": ..., "previous_mb": ...}}`
+or `None` on any fetch/render failure. Its calendar shows only a few recent
+rows (investing.com shows ~10). Two independent tables on a TE
+indicator page, parsed separately:
 
-Running the scrapers needs `python -m playwright install chromium` once; the
-consensus and api_monitor workflows do it in CI.
+- **Calendar table** (`tr.an-estimate-row`) — history + one upcoming row.
+  Only some indicators have it (API crude does; API Cushing/gasoline/
+  distillate don't) — absence returns `calendar_rows: None`, not an error, so
+  callers must not treat `None` the same as "not fetched yet."
+- **Stats table** (`<table class="table">` with `Actual`/`Previous`/`Unit`
+  headers) — every indicator page has this; it's how the "Unit" check
+  disambiguates it from the calendar table, which also carries
+  `class="table"` but no `Unit` column.
 
-### Telegram delivery
+Use as a context manager to reuse one browser across several slugs
+(`with TradingEconomicsScraper() as s: ...`); used standalone, each
+`fetch_page()` call opens and closes its own browser.
 
-`telegram_bot.py` is also the shared notifier — `send_message` / `send_error`
-are imported by other scripts rather than talking to the Bot API directly.
-Messages are sent as plain text (no `parse_mode`) so premium figures and
-underscores never need escaping. `format_signal()` renders a `signal.json`
-dict (grade/direction/confidence/expiry/strike/drivers/risks) into the
-Wednesday alert, including a skip-week and an expiry-skip variant — but
-nothing in the current tree writes `data/signal.json`.
+### `app/scraper/sites/investing.py` — `InvestingCalendarScraper`
 
-### GitHub Actions
+Same `fetch_page(slug)` → `{"calendar_rows": ..., "stats": ...}` contract and
+same row shape, against investing.com's economic-calendar occurrence-table
+pages (`in.investing.com/economic-calendar/<slug>`; crude is
+`eia-crude-oil-inventories-75`). `calendar_rows` comes from
+`table[data-test="occurrence-table"]`; `stats` comes from a "Latest Release"
+widget matched by label text (`_label_value`) because that widget carries no
+stable id or `data-test` attribute — only Tailwind utility classes, which can
+change on any redeploy. `stats` also has `forecast_mb`, which TE's does not.
+Its times are GMT on the page; `gmt_to_ist()` converts them.
 
-Four workflows in `.github/workflows/` run on cron and **commit `data/` back to
-the repo** — the runner is ephemeral, so committed JSON is how Wednesday's
-signal path sees Tuesday's consensus. `data/active_trade.json`,
-`journal.json` and `journal_export.csv` stay local and gitignored (their
-producers, `monitor.py`/`journal.py`, are currently removed).
+**investing.com blocks aggressively; behaviour observed live:**
 
-- `twpr_consensus.yml` — Tue 19:00 IST — `consensus_fetcher.py --no-prompt`
-- `twpr_api_monitor.yml` — Wed 01:45 IST — `api_monitor.py --no-prompt`
-- `twpr_eia_signal.yml` — Wed 20:00 IST — prebrief, `eia_parser.py`,
-  `signal_engine.py` (missing), `telegram_bot.py`
-- `twpr_market_data.yml` — 09:00 IST Mon–Fri — `market_data.py` (missing)
+- 2026-09-28: repeated requests inside a short window → HTTP 429. Also hit
+  by an older approach that POSTed to the calendar-service endpoint (the
+  `WB-OS` project's `setup2_wednesday_barrel.md` flags investing.com events as
+  403/Cloudflare-blocked too), so the request shape isn't the cause.
+- 2026-09-29: a fresh session got 403 on the first load, 403 on the first
+  reload, then 200 with the table on the second reload. That is why `goto()`
+  reloads twice. It fixes the first-load 403, **not** a sustained 429 — if a
+  reload loop keeps failing, the IP is rate-limited; back off rather than
+  adding stealth/proxy tricks.
+- **A second page load in the same browser session was 403 on every attempt**,
+  even after `page_gap_s=10` and two reloads (the old pipeline's notes say
+  Cloudflare challenges every page after the first). So: one `fetch_page` per
+  investing.com session, derive every row you need from it with
+  `row_for_release`, and don't loop slugs. TE has no such limit.
 
-All four use `concurrency: group: twpr-data` so they can't race on the `data/`
-commit.
+Treat investing.com as a flaky fallback and tradingeconomics.com as the
+reliable source, the same conclusion the deleted pipeline reached.
 
-## What's gone from the working tree (uncommitted)
+## Rebuilding the pipeline
 
-Present in `git log` but deleted locally and not yet restored or replaced:
-
-- `app/signal_engine.py` (emptied, not deleted — the 5-step rule engine),
-  `app/expiry.py` (days-to-expiry gate), `app/currency.py` (INR context),
-  `app/journal.py`, `app/market_data.py`, `app/monitor.py`,
-  `app/petrocore_client.py`, `app/scheduler.py`
-- `docs/twpr_setup_spec.md`, `docs/manual_testing.md`,
-  `docs/claude_code_twpr_prompt.md`
-- everything under `tests/`
-- `README.md` content (file still exists, now empty)
-
-`data/reference_week.json` still holds the pinned reference week (week ending
-2026-09-04: crude deviation +1.209 mb → Grade B bearish, confidence 55,
-1-OTM put, size 1.5%) — useful if the engine is rebuilt, since it's the number
-that must reproduce exactly.
+If/when the fetchers, signal engine, and delivery layer come back, the design
+decisions the old pipeline made (documented previously, now only in git
+history) are worth reading before re-deriving them from scratch — in
+particular: the days-to-expiry gate, the 5-step rule engine and its Sep 4
+2026 reference week, the currency/INR strike math, and the
+consensus-source fallback order. Pull the old `CLAUDE.md` with
+`git show 095a5cc:CLAUDE.md` (or any SHA before `d252907`) rather than
+reconstructing it by trial and error.
