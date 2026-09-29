@@ -21,11 +21,11 @@ history as "current" anymore; it's only recoverable via `git show
 `.gitkeep`.
 
 **What exists now** (rebuilt after that cleanup): `app/scraper/` (the TE and
-investing.com scrapers), `app/consensus_fetcher.py` (the first pipeline script,
-built on them), `app/common.py` (`DATA_DIR`, `setup_logging`, `now_utc`,
-`now_ist`, `write_json`), and `tests/`. Everything else the old pipeline had
-(actuals parser, API monitor, signal engine, Telegram, expiry/currency,
-journal, CI workflows) is **not present** until rebuilt — don't assume
+investing.com scrapers), `app/consensus_fetcher.py` and `app/api_monitor.py`
+(pipeline scripts built on them), `app/racer.py` (the shared race), `app/common.py`
+(`DATA_DIR`, `setup_logging`, `now_utc`, `now_ist`, `write_json`), and `tests/`.
+Everything else the old pipeline had (EIA actuals parser, signal engine, Telegram,
+expiry/currency, journal, CI workflows) is **not present** until rebuilt — don't assume
 `env()`, `read_json`, `signal_engine.py` etc. exist.
 
 **Naming rule:** TE's "Consensus" and investing.com's "Forecast" are the same
@@ -50,6 +50,10 @@ python -m app.scraper.sites.investing
 python -m app.consensus_fetcher                    # next unreleased EIA report -> data/consensus.json
 python -m app.consensus_fetcher --date 23-09-2026  # a specific release (replay / testing)
 python -m app.consensus_fetcher --sites tradingeconomics
+
+python -m app.api_monitor                          # latest due API report, polls until it lands
+python -m app.api_monitor --once                   # single attempt
+python -m app.api_monitor --date 22-09-2026 --once # replay a specific release
 
 python -m pytest tests -q                          # offline suite (default)
 python -m pytest tests -m network -k tradingeconomics   # live URL health check
@@ -104,6 +108,44 @@ How it works — keep these properties when changing it:
   (pipeline data is committed by design).
 - Mixed-source outcomes are covered by offline tests only; live runs so far were
   all-`tradingeconomics`.
+
+### `app/racer.py` — the shared race
+
+`race(sites, fields, job, release_date, timeout_s, what)` runs `job(site, stop, ok,
+fail)` on one daemon thread per site; each job reports fields as they land. The
+first valid candidate per field wins (`decide()`), fields are won independently, and
+every winner must share one release date, anchored by the first field in `fields`
+(or `--date`). Raises `RuntimeError` naming each undecided field with per-site
+reasons; "no site supplied it" vs "no answer within Ns" distinguishes a field nobody
+carries from a timeout. Both pipeline scripts use it — don't re-implement the race.
+
+### `app/api_monitor.py` — the API report
+
+Writes `data/api_report.json`: `release_date`, `api_crude_mb`, `api_cushing_mb`,
+`api_gasoline_mb`, `api_distillate_mb`, `crude_source`, `cushing_source`,
+`gasoline_source`, `distillate_source`, `fetched_at` (IST, `DD-MM-YYYY HH:MM`). All
+actuals; no consensus exists for this report. Published Tue ~16:30 ET (Wed ~02:00
+IST); without `--once` it polls every 5 min for up to 4 h. Nothing is written unless
+all four fields are valid.
+
+- **Crude** is a dated row on both sites, raced like the consensus.
+- **Cushing / gasoline / distillate exist only on TE**, as an **undated, 2-decimal
+  "Related" snapshot** (`parse_related_table`); investing.com's events for them are
+  dead (see `sources.py`). Reading that blind could silently return last week's
+  numbers, so it is taken from the **same page load** as the dated crude row
+  (`fetch_with_soup`) and accepted only if its crude value matches that row's actual
+  (`legs_from_snapshot`, tolerance 0.0051). Consequently: those three legs are
+  2-decimal (crude keeps 3), and an explicit `--date` for anything but the latest
+  release is rejected for the legs ("different release").
+- Default target is the **latest release due** by today's UTC date (`latest_due_row`),
+  not `pending_row`: after the report prints, the next-unreleased row jumps to next
+  week, which would be wrong here. If that row hasn't printed it fails "not released
+  yet" (and the poll retries).
+- Unverified: TE reports gasoline and distillate as **both -2.16** for the 22-09
+  release (their "previous" differ: 1.46 vs 1.61). Suspiciously equal and no second
+  source exists to check — look at those two TE pages by hand before trading on them.
+- TE and investing.com show the same API release a few minutes apart in `time`
+  (02:30 vs 02:00 AM IST); the dates and values agree.
 
 ### `app/scraper/browser.py`
 
@@ -195,6 +237,10 @@ them identical — put any new parsing here, not in a site file:
 - `gmt_to_ist()`, `to_mb_suffixed()` (`'-1.6M'`/`'250K'` → float).
 - `row_for_release(rows, release_date=None)` — the row whose `release_date`
   matches exactly, else `None`; no date = latest released row.
+- `latest_due_row(rows, today)` — latest release dated on/before `today`; `pending_row(rows)`
+  — earliest unreleased. `CalendarScraper.fetch_with_soup(slug)` returns `(page, soup)`
+  from one load for callers needing something outside the shared contract (TE's
+  `parse_related_table`).
 - `DATE_FORMAT = "%d-%m-%Y"` is the default for every date the scrapers take or
   return (`parse_date` / `format_date`). ISO `YYYY-MM-DD` input is also accepted
   but output is always DD-MM-YYYY. Compare dates as `date` objects, never as

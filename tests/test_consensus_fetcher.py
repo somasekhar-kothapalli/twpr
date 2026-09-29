@@ -2,7 +2,8 @@ import time
 
 import pytest
 
-from app.consensus_fetcher import decide, fetch_consensus
+from app.consensus_fetcher import INDICATORS, fetch_consensus
+from app.racer import decide
 from app.scraper.sources import slug_for
 
 UPCOMING = "30-09-2026"
@@ -142,6 +143,6 @@ def test_timeout_when_nobody_answers():
 
 def test_decide_holds_gasoline_until_the_crude_date_is_known():
     cand = lambda d: {"release_date": d, "consensus": 0.1, "previous": 1.0}
-    assert decide({"gasoline": [("tradingeconomics", cand(UPCOMING))]}) == {}
+    assert decide(INDICATORS, {"gasoline": [("tradingeconomics", cand(UPCOMING))]}) == {}
     both = {"crude": [("investing", cand(UPCOMING))], "gasoline": [("tradingeconomics", cand(UPCOMING))]}
-    assert set(decide(both)) == {"crude", "gasoline"}
+    assert set(decide(INDICATORS, both)) == {"crude", "gasoline"}

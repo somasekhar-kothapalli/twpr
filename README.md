@@ -65,6 +65,20 @@ command exits non-zero with the reason instead of writing partial data.
 "Consensus" is TradingEconomics' *Consensus* and investing.com's *Forecast* (the
 same figure), named `consensus` throughout.
 
+## API report monitor
+
+Captures the API (American Petroleum Institute) weekly inventory report into
+`data/api_report.json`: crude, Cushing, gasoline and distillate changes in
+million barrels, with the source of each. Crude is raced between both sites; the
+other three legs come from TradingEconomics only, cross-checked against the dated
+crude row so a stale week is rejected. Cushing/gasoline/distillate are 2-decimal.
+
+```bash
+python -m app.api_monitor              # latest due report, polls until it is out
+python -m app.api_monitor --once       # single attempt
+python -m app.api_monitor --date 22-09-2026 --once
+```
+
 ## Where the URLs live
 
 All slugs are in `app/scraper/sources.py`, keyed by indicator name (`eia_crude`,

@@ -53,24 +53,31 @@ class CalendarScraper:
         self._session_cm = None
 
     def fetch_page(self, slug):
+        return self.fetch_with_soup(slug)[0]
+
+    def fetch_with_soup(self, slug):
+        """(page, soup) from ONE page load, so a caller that needs something the
+        shared contract doesn't carry can read it from the same snapshot. (None, None)
+        on any fetch/render failure."""
         url = urljoin(self.base_url, slug.lstrip("/"))
         name = type(self).__name__
         try:
             html = self._render(url)
         except PlaywrightTimeoutError:
             log.warning(f"{name}: no table on {url} within {self.timeout_ms}ms (bad slug or blocked)")
-            return None
+            return None, None
         except Exception:
             log.exception(f"{name}: page render failed for slug={slug}")
-            return None
+            return None, None
 
         soup = BeautifulSoup(html, "html.parser")
         rows = self.parse_rows(soup)
         stats = self.parse_stats(soup, rows)
-        return {
+        page = {
             "calendar_rows": rows or None,
             "stats": {key: stats.get(key) for key in STAT_KEYS},
         }
+        return page, soup
 
     def fetch_release(self, slug, release_date=None):
         """The calendar row released on `release_date` (DD-MM-YYYY; default:

@@ -12,6 +12,9 @@ SITES = {
     "investing": InvestingCalendarScraper,
 }
 
+# Names written into pipeline output files.
+SOURCE_NAMES = {"tradingeconomics": "tradingeconomics", "investing": "investing.com"}
+
 INDICATORS = {
     "eia_crude": {
         "tradingeconomics": "united-states/crude-oil-stocks-change",

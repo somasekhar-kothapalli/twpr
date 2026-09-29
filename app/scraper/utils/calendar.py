@@ -69,6 +69,14 @@ def pending_row(rows):
     return min(pending, key=lambda r: parse_date(r["release_date"])) if pending else None
 
 
+def latest_due_row(rows, today):
+    """The most recent release dated on or before `today` (a date), released or
+    not. Unlike pending_row it stays on the current release after it prints
+    instead of jumping to next week's."""
+    due = [r for r in rows or [] if parse_date(r["release_date"]) and parse_date(r["release_date"]) <= today]
+    return max(due, key=lambda r: parse_date(r["release_date"])) if due else None
+
+
 def row_for_release(rows, release_date=None):
     """The calendar row released on `release_date` (DD-MM-YYYY by default; ISO or
     a date also accepted), or None. With no date, the latest released row. Exact

@@ -17,20 +17,17 @@ Run from the repo root:
 import argparse
 import logging
 import os
-import queue
 import sys
-import threading
-import time
 
 from app.common import DATA_DIR, now_ist, setup_logging, write_json
-from app.scraper.sources import scraper_for, slug_for
+from app.racer import race
+from app.scraper.sources import SOURCE_NAMES, scraper_for, slug_for
 from app.scraper.utils.calendar import format_date, pending_row, row_for_release
 
 logger = logging.getLogger("twpr.consensus_fetcher")
 
 CONSENSUS_FILE = DATA_DIR / "consensus.json"
 SITES = ("tradingeconomics", "investing")
-SOURCE_NAMES = {"tradingeconomics": "tradingeconomics", "investing": "investing.com"}
 INDICATORS = ("crude", "gasoline", "distillate")  # crude first: it carries crude_previous_mb
 RACE_TIMEOUT_S = 480  # investing.com needs one paced browser session per indicator
 FETCHED_AT_FORMAT = "%d-%m-%Y %H:%M"  # IST
@@ -59,39 +56,18 @@ def fetch_candidate(site, name, release_date, stop, make_scraper):
     return {"release_date": row["release_date"], "consensus": row["consensus"], "previous": row["previous"]}
 
 
-def decide(candidates, release_date=None):
-    """First valid candidate per indicator, all for one release date.
-
-    `candidates` = {name: [(site, candidate), ...]} in arrival order. The date is
-    anchored by `release_date` if given, else by the crude winner; until it is
-    known, gasoline/distillate stay undecided. Returns {name: (site, candidate)}.
-    """
-    anchor = format_date(release_date) if release_date else None
-    decided = {}
-    for name in INDICATORS:
-        if anchor is None and name != "crude":
-            break
-        for site, cand in candidates.get(name, []):
-            if anchor is None or cand["release_date"] == anchor:
-                decided[name] = (site, cand)
-                anchor = anchor or cand["release_date"]
-                break
-    return decided
-
-
-def _worker(site, release_date, stop, make_scraper, out):
-    """Walk the indicators on one site, reporting each to `out` as it lands."""
-    try:
+def _job(release_date, make_scraper):
+    """A site's job: walk the indicators, reporting each as it lands."""
+    def run(site, stop, ok, fail):
         gap = getattr(make_scraper(site), "session_gap_s", 0)
         for i, name in enumerate(INDICATORS):
             if i and stop.wait(gap):  # paced sessions; wakes early if the race ended
                 return
             try:
-                out.put((site, name, fetch_candidate(site, name, release_date, stop, make_scraper), None))
+                ok(name, fetch_candidate(site, name, release_date, stop, make_scraper))
             except Exception as exc:  # noqa: BLE001 - one indicator failing must not sink the site
-                out.put((site, name, None, exc))
-    finally:
-        out.put((site, None, None, None))  # site finished
+                fail(name, exc)
+    return run
 
 
 def _payload(decided):
@@ -110,47 +86,10 @@ def _payload(decided):
 
 def fetch_consensus(release_date=None, sites=SITES, make_scraper=scraper_for, timeout_s=RACE_TIMEOUT_S):
     """Race `sites` per indicator; return the payload (without fetched_at)."""
-    out = queue.Queue()
-    stop = threading.Event()
-    for site in sites:
-        threading.Thread(target=_worker, args=(site, release_date, stop, make_scraper, out),
-                         daemon=True, name=site).start()
-
-    candidates = {name: [] for name in INDICATORS}
-    errors = {name: {} for name in INDICATORS}
-    running = len(sites)
-    deadline = time.monotonic() + timeout_s
-    while running:
-        try:
-            site, name, cand, exc = out.get(timeout=max(0.0, deadline - time.monotonic()))
-        except queue.Empty:
-            break
-        if name is None:
-            running -= 1
-            continue
-        if exc is not None:
-            errors[name][site] = exc
-            logger.warning("%s / %s failed: %s", site, name, exc)
-            continue
-        candidates[name].append((site, cand))
-        decided = decide(candidates, release_date)
-        if len(decided) == len(INDICATORS):
-            stop.set()
-            result = _payload(decided)
-            logger.info("sources: %s", {n: result[f"{n}_source"] for n in INDICATORS})
-            return result
-
-    stop.set()
-    decided = decide(candidates, release_date)
-    problems = []
-    for name in INDICATORS:
-        if name in decided:
-            continue
-        why = "; ".join(f"{s}: {e}" for s, e in errors[name].items())
-        if candidates[name] and not why:
-            why = "values found but for a different release date than the crude winner"
-        problems.append(f"{name} ({why or f'no answer within {timeout_s}s'})")
-    raise RuntimeError("no valid consensus for " + ", ".join(problems))
+    decided = race(sites, INDICATORS, _job(release_date, make_scraper), release_date, timeout_s, what="consensus")
+    result = _payload(decided)
+    logger.info("sources: %s", {n: result[f"{n}_source"] for n in INDICATORS})
+    return result
 
 
 def main(argv=None):
