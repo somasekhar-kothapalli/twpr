@@ -77,6 +77,23 @@ def latest_due_row(rows, today):
     return max(due, key=lambda r: parse_date(r["release_date"])) if due else None
 
 
+def current_release(rows, today, max_age_days=1):
+    """The latest release due by `today`, provided it is at most `max_age_days` old.
+
+    Guards the holiday-delayed week: if today's report is not on the calendar
+    yet, the latest due row is LAST week's already-printed one, which must not be
+    mistaken for a fresh release. Raises RuntimeError instead of guessing.
+    """
+    row = latest_due_row(rows, today)
+    if row is None:
+        raise RuntimeError(f"no release due by {today:%d-%m-%Y}")
+    age = (today - parse_date(row["release_date"])).days
+    if age > max_age_days:
+        raise RuntimeError(
+            f"latest release {row['release_date']} is {age} days old - the current report is not on the calendar yet")
+    return row
+
+
 def row_for_release(rows, release_date=None):
     """The calendar row released on `release_date` (DD-MM-YYYY by default; ISO or
     a date also accepted), or None. With no date, the latest released row. Exact

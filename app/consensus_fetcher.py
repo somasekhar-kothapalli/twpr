@@ -19,8 +19,8 @@ import logging
 import os
 import sys
 
-from app.common import DATA_DIR, now_ist, setup_logging, write_json
-from app.racer import race
+from app.utils.common import DATA_DIR, now_ist, setup_logging, write_json
+from app.utils.racer import race
 from app.scraper.sources import SOURCE_NAMES, scraper_for, slug_for
 from app.scraper.utils.calendar import format_date, pending_row, row_for_release
 

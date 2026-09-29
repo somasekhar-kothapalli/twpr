@@ -3,7 +3,7 @@ import time
 import pytest
 
 from app.consensus_fetcher import INDICATORS, fetch_consensus
-from app.racer import decide
+from app.utils.racer import decide
 from app.scraper.sources import slug_for
 
 UPCOMING = "30-09-2026"

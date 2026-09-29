@@ -5,6 +5,9 @@ each field as it lands: `ok(field, candidate)` or `fail(field, exc)`. A candidat
 is a dict carrying at least `release_date`. Fields are decided independently, so
 different sites can win different fields, but every winner must share one
 release date, anchored by the first field (or by `release_date` if given).
+
+Fields named in `optional` don't have to be delivered: once every required field
+is decided the race waits up to `grace_s` more for them, then returns without.
 """
 import logging
 import queue
@@ -36,9 +39,11 @@ def decide(fields, candidates, release_date=None):
     return decided
 
 
-def race(sites, fields, job, release_date=None, timeout_s=480, what="value"):
-    """Run `job` for every site at once; return {field: (site, candidate)} for all
-    `fields`, or raise RuntimeError naming each field nobody could deliver."""
+def race(sites, fields, job, release_date=None, timeout_s=480, what="value", optional=(), grace_s=0):
+    """Run `job` for every site at once; return {field: (site, candidate)} for every
+    required field (plus any optional ones that arrived in time), or raise
+    RuntimeError naming each required field nobody could deliver."""
+    required = [f for f in fields if f not in optional]
     out = queue.Queue()
     stop = threading.Event()
 
@@ -60,12 +65,13 @@ def race(sites, fields, job, release_date=None, timeout_s=480, what="value"):
     errors = {f: {} for f in fields}
     running = len(sites)
     timed_out = False
-    deadline = time.monotonic() + timeout_s
+    wait_until = time.monotonic() + timeout_s
+    got_required = False
     while running:
         try:
-            site, field, cand, exc = out.get(timeout=max(0.0, deadline - time.monotonic()))
+            site, field, cand, exc = out.get(timeout=max(0.0, wait_until - time.monotonic()))
         except queue.Empty:
-            timed_out = True
+            timed_out = not got_required
             break
         if field is None:
             running -= 1
@@ -76,14 +82,20 @@ def race(sites, fields, job, release_date=None, timeout_s=480, what="value"):
             continue
         candidates[field].append((site, cand))
         decided = decide(fields, candidates, release_date)
-        if len(decided) == len(fields):
-            stop.set()
-            return decided
+        if not all(f in decided for f in required):
+            continue
+        if all(f in decided for f in fields):
+            break
+        if not got_required:  # report is in; give the optional fields a short grace
+            got_required = True
+            wait_until = min(wait_until, time.monotonic() + grace_s)
 
     stop.set()
     decided = decide(fields, candidates, release_date)
+    if all(f in decided for f in required):
+        return decided
     problems = []
-    for field in fields:
+    for field in required:
         if field in decided:
             continue
         why = "; ".join(f"{s}: {e}" for s, e in errors[field].items())

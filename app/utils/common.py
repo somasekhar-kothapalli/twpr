@@ -2,11 +2,12 @@
 import json
 import logging
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+DATA_DIR = Path(__file__).parent.parent.parent / "data"  # <repo>/data (this file is app/utils/common.py)
 IST = ZoneInfo("Asia/Kolkata")
 
 
@@ -33,3 +34,18 @@ def now_ist():
 def write_json(path, payload):
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+
+def poll(attempt, once, interval_s, timeout_s, log):
+    """Call `attempt()` until it returns. A RuntimeError means "not there yet": it is
+    logged and retried every `interval_s` until `timeout_s`, then re-raised.
+    With `once`, the first RuntimeError is raised immediately. Other errors propagate."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            return attempt()
+        except RuntimeError as exc:
+            if once or time.monotonic() + interval_s > deadline:
+                raise
+            log.info("not available yet (%s) - retrying in %ds", exc, interval_s)
+            time.sleep(interval_s)

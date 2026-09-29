@@ -143,3 +143,10 @@ def test_related_table_parser_and_snapshot_check():
     assert ok == {"cushing": 2.08, "gasoline": -2.16, "distillate": -2.16}
     assert all(isinstance(v, ValueError) for v in legs_from_snapshot(related, {"actual": 5.0}).values())
     assert parse_related_table(BeautifulSoup("<p>nothing</p>", "html.parser")) == {}
+
+
+def test_stale_default_target_is_refused():
+    """Holiday-shifted week: the latest due report is days old and already printed."""
+    with pytest.raises(RuntimeError, match="days old"):
+        fetch_api_report(today=datetime.date(2026, 9, 26), timeout_s=5,
+                         make_scraper=make(tradingeconomics=te(), investing=inv()))

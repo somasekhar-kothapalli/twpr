@@ -79,6 +79,21 @@ python -m app.api_monitor --once       # single attempt
 python -m app.api_monitor --date 22-09-2026 --once
 ```
 
+## EIA actuals
+
+Captures the EIA Weekly Petroleum Status Report into `data/eia_actuals.json`:
+crude, Cushing, gasoline and distillate stock changes (million barrels, negative
+= draw). Both sites race and the first to return the complete report wins.
+investing.com's week-over-week refinery utilisation *change* is included as
+`refinery_util_change_pct` (best effort; `null` if it doesn't arrive in time). The
+utilisation level itself is not available from either site.
+
+```bash
+python -m app.eia_actuals                           # today's report, polls until it is out
+python -m app.eia_actuals --once
+python -m app.eia_actuals --date 23-09-2026 --once  # replay a release
+```
+
 ## Where the URLs live
 
 All slugs are in `app/scraper/sources.py`, keyed by indicator name (`eia_crude`,

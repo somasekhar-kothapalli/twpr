@@ -24,13 +24,12 @@ import argparse
 import logging
 import os
 import sys
-import time
 
-from app.common import DATA_DIR, now_ist, now_utc, setup_logging, write_json
-from app.racer import race
+from app.utils.common import DATA_DIR, now_ist, now_utc, poll, setup_logging, write_json
+from app.utils.racer import race
 from app.scraper.sites.tradingeconomics import parse_related_table
 from app.scraper.sources import SOURCE_NAMES, scraper_for, slug_for
-from app.scraper.utils.calendar import latest_due_row, row_for_release
+from app.scraper.utils.calendar import current_release, row_for_release
 
 logger = logging.getLogger("twpr.api_monitor")
 
@@ -53,11 +52,11 @@ FETCHED_AT_FORMAT = "%d-%m-%Y %H:%M"  # IST
 
 
 def released_crude_row(rows, release_date, today):
-    """The crude row for `release_date`, or the latest one due by `today` - and it
-    must have printed. Raises if not."""
-    row = row_for_release(rows, release_date) if release_date else latest_due_row(rows, today)
+    """The crude row for `release_date`, or today's current release (see
+    current_release) - and it must have printed. Raises if not."""
+    row = row_for_release(rows, release_date) if release_date else current_release(rows, today)
     if row is None:
-        raise RuntimeError(f"no API crude row for {release_date or f'a release due by {today:%d-%m-%Y}'}")
+        raise RuntimeError(f"no API crude row for {release_date}")
     if row["actual"] is None:
         raise RuntimeError(f"API report for {row['release_date']} not released yet")
     return row
@@ -131,16 +130,8 @@ def main(argv=None):
     parser.add_argument("--sites", nargs="+", choices=SITES, default=list(SITES))
     args = parser.parse_args(argv)
     try:
-        deadline = time.monotonic() + POLL_TIMEOUT_S
-        while True:
-            try:
-                result = fetch_api_report(args.date, tuple(args.sites))
-                break
-            except RuntimeError as exc:
-                if args.once or time.monotonic() + POLL_INTERVAL_S > deadline:
-                    raise
-                logger.info("API report not available yet (%s) - retrying in %ds", exc, POLL_INTERVAL_S)
-                time.sleep(POLL_INTERVAL_S)
+        result = poll(lambda: fetch_api_report(args.date, tuple(args.sites)),
+                      args.once, POLL_INTERVAL_S, POLL_TIMEOUT_S, logger)
         payload = {**result, "fetched_at": now_ist().strftime(FETCHED_AT_FORMAT)}
         write_json(API_REPORT_FILE, payload)
         logger.info(

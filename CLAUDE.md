@@ -21,10 +21,10 @@ history as "current" anymore; it's only recoverable via `git show
 `.gitkeep`.
 
 **What exists now** (rebuilt after that cleanup): `app/scraper/` (the TE and
-investing.com scrapers), `app/consensus_fetcher.py` and `app/api_monitor.py`
-(pipeline scripts built on them), `app/racer.py` (the shared race), `app/common.py`
+investing.com scrapers), `app/consensus_fetcher.py`, `app/api_monitor.py` and
+`app/eia_actuals.py` (pipeline scripts built on them), `app/utils/racer.py` (the shared race), `app/utils/common.py`
 (`DATA_DIR`, `setup_logging`, `now_utc`, `now_ist`, `write_json`), and `tests/`.
-Everything else the old pipeline had (EIA actuals parser, signal engine, Telegram,
+Everything else the old pipeline had (signal engine, Telegram,
 expiry/currency, journal, CI workflows) is **not present** until rebuilt — don't assume
 `env()`, `read_json`, `signal_engine.py` etc. exist.
 
@@ -54,6 +54,10 @@ python -m app.consensus_fetcher --sites tradingeconomics
 python -m app.api_monitor                          # latest due API report, polls until it lands
 python -m app.api_monitor --once                   # single attempt
 python -m app.api_monitor --date 22-09-2026 --once # replay a specific release
+
+python -m app.eia_actuals                           # today's EIA report, polls until it lands
+python -m app.eia_actuals --once                    # single attempt
+python -m app.eia_actuals --date 23-09-2026 --once  # replay a specific release
 
 python -m pytest tests -q                          # offline suite (default)
 python -m pytest tests -m network -k tradingeconomics   # live URL health check
@@ -109,7 +113,7 @@ How it works — keep these properties when changing it:
 - Mixed-source outcomes are covered by offline tests only; live runs so far were
   all-`tradingeconomics`.
 
-### `app/racer.py` — the shared race
+### `app/utils/racer.py` — the shared race
 
 `race(sites, fields, job, release_date, timeout_s, what)` runs `job(site, stop, ok,
 fail)` on one daemon thread per site; each job reports fields as they land. The
@@ -146,6 +150,47 @@ all four fields are valid.
   source exists to check — look at those two TE pages by hand before trading on them.
 - TE and investing.com show the same API release a few minutes apart in `time`
   (02:30 vs 02:00 AM IST); the dates and values agree.
+
+### `app/eia_actuals.py` — the EIA actuals
+
+Writes `data/eia_actuals.json`: `release_date`, `released_at`, `crude_change_mb`,
+`cushing_change_mb`, `gasoline_change_mb`, `distillate_change_mb`,
+`refinery_util_change_pct`, `source`, `won_race`, `fetched_at` (times IST, `DD-MM-YYYY HH:MM`).
+Stock **changes** in million barrels, negative = draw (`cushing_change_mb` is a
+change, not the stock level — the old `cushing_stocks_mb` name was misleading).
+Released Wed 10:30 ET (20:00 IST); polls every 60 s for up to 90 min unless `--once`.
+
+- **Whole-report race, not per-field:** each site walks crude -> cushing -> gasoline
+  -> distillate and only yields a candidate when all four are released and on the
+  same release date; the first complete site wins, so `source` is a single site and
+  the report never mixes sites. `won_race` is `True` when more than one site raced
+  (`False` under `--sites <one>`) — that meaning is my reading of the spec, confirm it
+  if something depends on it. `released_at` is when the numbers were first seen, not
+  the calendar's 20:00.
+- **There is no `refinery_util_pct`; only `refinery_util_change_pct`.** The refinery
+  utilisation *level* (~93%) was removed from the output at the user's request: no
+  scraped source has it (TE only has *Refinery Crude Runs* in thousand barrels), and
+  investing.com's event 1961 ("EIA Weekly Refinery Utilization Rates") lists only the
+  week-over-week *change* (`-2.8%`, `-1.0%`, `0.6%`... — cross-checked: TE crude runs
+  -519 kb/d ≈ -2.8 pts). That change is `refinery_util_change_pct`; never present it as
+  a level. Only the EIA API publishes the level (needs a free `EIA_API_KEY`; none
+  configured) — add it as a third source if the level is ever wanted. Nothing
+  downstream reads either.
+- **The refinery change is an *optional* race field.** Only investing.com has it, so
+  it can't gate the report (TE could never win). investing.com's job fetches the
+  refinery page **first** and offers a candidate per printed row; `decide()` picks the
+  row matching the winning report's release date. Once the report is decided the race
+  waits `REFINERY_GRACE_S` (30 s) for it, else it is `null` — a refinery failure never
+  sinks the report. Live: 13.7 s end to end with the change captured. The cost is that
+  investing.com's report candidate starts one paced session later (its fallback role).
+- `racer.race(..., optional=(...), grace_s=...)`: optional fields never cause a failure;
+  once every required field is decided the race waits up to `grace_s` more for them.
+- **Holiday guard (`current_release`):** the auto target is the latest release due by
+  today's UTC date, and it is refused if more than 1 day old. Without this, in a
+  Thursday-delayed week, Wednesday's run would return LAST week's already-printed
+  report as fresh. `api_monitor` uses the same guard. An explicit `--date` bypasses it.
+- `common.poll(attempt, once, interval_s, timeout_s, log)` retries on `RuntimeError`
+  ("not there yet") and lets every other exception propagate; both polling scripts use it.
 
 ### `app/scraper/browser.py`
 
@@ -237,7 +282,9 @@ them identical — put any new parsing here, not in a site file:
 - `gmt_to_ist()`, `to_mb_suffixed()` (`'-1.6M'`/`'250K'` → float).
 - `row_for_release(rows, release_date=None)` — the row whose `release_date`
   matches exactly, else `None`; no date = latest released row.
-- `latest_due_row(rows, today)` — latest release dated on/before `today`; `pending_row(rows)`
+- `current_release(rows, today, max_age_days=1)` — latest due release, refused if stale
+  (holiday guard); `latest_due_row(rows, today)` — the same without the age check;
+  `pending_row(rows)`
   — earliest unreleased. `CalendarScraper.fetch_with_soup(slug)` returns `(page, soup)`
   from one load for callers needing something outside the shared contract (TE's
   `parse_related_table`).
