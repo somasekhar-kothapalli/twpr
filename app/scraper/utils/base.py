@@ -12,14 +12,14 @@ from .calendar import row_for_release
 
 log = logging.getLogger("twpr.scraper")
 
-STAT_KEYS = ("actual_mb", "forecast_mb", "previous_mb")
+STAT_KEYS = ("actual_mb", "consensus_mb", "previous_mb")
 
 
 class CalendarScraper:
     """fetch_page(slug) -> {"calendar_rows": [row, ...] | None,
-                            "stats": {actual_mb, forecast_mb, previous_mb}}
+                            "stats": {actual_mb, consensus_mb, previous_mb}}
     or None on any fetch/render failure. Rows are
-    {release_date (DD-MM-YYYY), time, actual, forecast, previous}. `stats` always carries all
+    {release_date (DD-MM-YYYY), time, actual, consensus, previous}. `stats` always carries all
     three keys (None when a site lacks one), and calendar_rows is None - never
     [] - when the page has no rows.
 
@@ -31,6 +31,7 @@ class CalendarScraper:
     base_url = ""
     wait_selector = ""
     page_gap_s = 0  # minimum seconds between page loads; sites that rate-limit set this
+    session_gap_s = 0  # advice for callers that open several sessions in a row
 
     def __init__(self, timeout_ms=30000, page_gap_s=None):
         self.timeout_ms = timeout_ms

@@ -20,14 +20,18 @@ history as "current" anymore; it's only recoverable via `git show
 <earlier-sha>:<path>` if it's ever needed as reference. `data/` holds only a
 `.gitkeep`.
 
-**What actually exists in `app/` right now is one thing**: `app/scraper/`, a
-browser-automation scraper pair for TradingEconomics and investing.com,
-ported in from a sibling project (`WB-OS`) as the seed for rebuilding the
-consensus/actuals fetchers. It has no caller yet — nothing in this repo reads
-its output, writes a `data/*.json` file, or talks to Telegram. Treat any
-mention of `common.py`, `signal_engine.py`, `consensus_fetcher.py`, the
-`env()` helper, etc. in old commit messages or in
-memory/history as **not present** until they're rebuilt.
+**What exists now** (rebuilt after that cleanup): `app/scraper/` (the TE and
+investing.com scrapers), `app/consensus_fetcher.py` (the first pipeline script,
+built on them), `app/common.py` (`DATA_DIR`, `setup_logging`, `now_utc`,
+`now_ist`, `write_json`), and `tests/`. Everything else the old pipeline had
+(actuals parser, API monitor, signal engine, Telegram, expiry/currency,
+journal, CI workflows) is **not present** until rebuilt — don't assume
+`env()`, `read_json`, `signal_engine.py` etc. exist.
+
+**Naming rule:** TE's "Consensus" and investing.com's "Forecast" are the same
+figure and are called **`consensus`** everywhere in this app (`consensus`,
+`consensus_mb`, `*_consensus_mb`). Never introduce `forecast`; the only place the
+word appears is investing.com's own on-page label, matched in `parse_stats`.
 
 ## Commands
 
@@ -42,17 +46,64 @@ python -m playwright install chromium   # one-off, needed for both scrapers
 python -m app.scraper.sites.tradingeconomics    # from the repo root
 python -m app.scraper.sites.investing
 # or: cd app && python -m scraper.sites.investing
+
+python -m app.consensus_fetcher                    # next unreleased EIA report -> data/consensus.json
+python -m app.consensus_fetcher --date 23-09-2026  # a specific release (replay / testing)
+python -m app.consensus_fetcher --sites tradingeconomics
+
+python -m pytest tests -q                          # offline suite (default)
+python -m pytest tests -m network -k tradingeconomics   # live URL health check
 ```
 
 The `__init__.py` files in `app/scraper/` and `app/scraper/sites/` are load-bearing
 for the `-m scraper...` form; if the directory gets recreated and they vanish,
 that command breaks (`app/` itself needs none — it's an implicit namespace package).
 
-There is no `tests/` directory and no test suite currently. `pytest.ini` is
-still present and still excludes `network`-marked tests by default
-(`-m "not network"`), but nothing in the repo defines any tests to run.
+`pytest.ini` sets `pythonpath = .` (so tests can `import app...`) and excludes
+`network`-marked tests by default (`-m "not network"`). `tests/test_consensus_fetcher.py`
+runs the whole race against fake scrapers, no browser or network.
 
 ## Architecture
+
+### `app/consensus_fetcher.py` — the consensus race
+
+Fetches `crude_consensus_mb`, `gasoline_consensus_mb`, `distillate_consensus_mb`
+and `crude_previous_mb` for the next unreleased EIA report (or `--date`) and
+writes `data/consensus.json`:
+
+```json
+{"release_date": "30-09-2026",
+ "crude_consensus_mb": -1.6, "gasoline_consensus_mb": -1.4, "distillate_consensus_mb": -0.7,
+ "crude_previous_mb": 2.415,
+ "crude_source": "tradingeconomics", "gasoline_source": "investing.com", "distillate_source": "investing.com",
+ "fetched_at": "29-09-2026 13:32"}
+```
+
+How it works — keep these properties when changing it:
+
+- **Both sites run at the same time**, one daemon thread and one browser each,
+  and **each indicator is won independently**: the first *valid* value per
+  indicator wins, so the three `*_source` fields can differ. `crude_previous_mb`
+  comes with the crude winner. Sources are named `tradingeconomics` / `investing.com`.
+- **Valid** = row found, `consensus` not `None` (and `previous` for crude). A site
+  that can't deliver an indicator (blocked, page changed, consensus not posted)
+  just loses that race; the other site still gets its turn.
+- **One release date for everything.** The crude winner (or `--date`) anchors it;
+  a gasoline/distillate candidate for a different date is skipped (`decide()`).
+- **Fails loudly** (exit 1, nothing written, per-site reasons logged) if any
+  indicator has no valid value. Never write a partial or guessed consensus: it is
+  the baseline of every deviation. Real example: run the day before the report,
+  both sites answered "consensus for 30-09-2026 not posted yet" -> exit 1 (the
+  consensus only appears close to the release; the old pipeline ran Tue 19:00 IST).
+- Without `--date` it picks each page's next unreleased row (`pending_row`).
+- investing.com gets one browser session per indicator, `session_gap_s` (60s)
+  apart, so it takes ~2.5 min when nothing wins early; TE takes ~5s. The loser is
+  abandoned mid-load and `__main__` ends with `os._exit` so a stuck Playwright
+  thread can't hang shutdown (checked: no orphaned browsers).
+- `fetched_at` is IST, `DD-MM-YYYY HH:MM`. `data/consensus.json` is tracked in git
+  (pipeline data is committed by design).
+- Mixed-source outcomes are covered by offline tests only; live runs so far were
+  all-`tradingeconomics`.
 
 ### `app/scraper/browser.py`
 
@@ -118,9 +169,9 @@ shape in one site only:
 
 ```
 fetch_page(slug) -> {"calendar_rows": [row, ...] | None,
-                     "stats": {"actual_mb", "forecast_mb", "previous_mb"}}   # or None on failure
+                     "stats": {"actual_mb", "consensus_mb", "previous_mb"}}   # or None on failure
 row = {"release_date": "DD-MM-YYYY", "time": "08:00 PM" (IST),
-       "actual"/"forecast"/"previous": float million barrels | None}
+       "actual"/"consensus"/"previous": float million barrels | None}
 ```
 
 `calendar_rows` is `None` (never `[]`) when there are no rows; `stats` always has
@@ -134,13 +185,13 @@ TE 0).
 
 ### `app/scraper/utils/calendar.py` — the shared row contract
 
-Both scrapers are meant to return **identical rows** except `forecast`
+Both scrapers are meant to return **identical rows** except `consensus`
 (the two sites poll different analyst panels; e.g. crude consensus -0.6 on TE
 vs -0.7 on investing.com for the 23-09-2026 release). This module is what keeps
 them identical — put any new parsing here, not in a site file:
 
 - Row shape: `{release_date: 'DD-MM-YYYY' str, time: IST 'HH:MM AM/PM' str,
-  actual / forecast / previous: float million barrels or None}`.
+  actual / consensus / previous: float million barrels or None}`.
 - `gmt_to_ist()`, `to_mb_suffixed()` (`'-1.6M'`/`'250K'` → float).
 - `row_for_release(rows, release_date=None)` — the row whose `release_date`
   matches exactly, else `None`; no date = latest released row.
@@ -160,8 +211,8 @@ Both scraper classes expose `fetch_release(slug, release_date=None)` =
 `actual` is `None`), so check `actual` before treating it as released.
 Both `python -m` runners take `--slug` and `--date` (`utils/cli.py`).
 
-Known unavoidable differences between the two sites: `forecast` (different
-panels, incl. `stats.forecast_mb`) and the number of history rows (TE shows ~3,
+Known unavoidable differences between the two sites: `consensus` (different
+panels, incl. `stats.consensus_mb`) and the number of history rows (TE shows ~3,
 investing.com ~10).
 
 ### `app/scraper/sites/tradingeconomics.py` — `TradingEconomicsScraper`
@@ -194,7 +245,7 @@ pages (`in.investing.com/economic-calendar/<slug>`; crude is
 `table[data-test="occurrence-table"]`; `stats` comes from a "Latest Release"
 widget matched by label text (`_label_value`) because that widget carries no
 stable id or `data-test` attribute — only Tailwind utility classes, which can
-change on any redeploy. `stats` also has `forecast_mb`, which TE's does not.
+change on any redeploy. `stats` also has `consensus_mb`, which TE's does not.
 Its times are GMT on the page; `gmt_to_ist()` converts them.
 
 **investing.com blocks aggressively; behaviour observed live:**

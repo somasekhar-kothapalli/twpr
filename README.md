@@ -21,8 +21,8 @@ missing.
 `app/scraper/` — Playwright-based scrapers for TradingEconomics and
 investing.com economic-calendar pages, the two sources the signal will need
 for analyst consensus and EIA/API actuals. Both return the same row shape
-(`release_date`, IST `time`, and `actual` / `forecast` / `previous` in million
-barrels); only `forecast` differs, since the sites poll different analyst
+(`release_date`, IST `time`, and `actual` / `consensus` / `previous` in million
+barrels); only `consensus` may differ slightly, since the sites poll different analyst
 panels. Both share one base class (`app/scraper/utils/base.py`) that defines
 the response shape, plus parsing helpers in `app/scraper/utils/calendar.py`.
 
@@ -47,6 +47,23 @@ Each opens a visible Chromium window and prints one page's
 `{calendar_rows, stats}` for a hardcoded slug (see the `if __name__ ==
 "__main__":` block in each file) — useful for confirming the scraper still
 parses the live page. Not yet wired into anything.
+
+## Consensus fetcher
+
+Fetches the analyst consensus for the next EIA report and writes
+`data/consensus.json`. Both sites are scraped at the same time and the first
+valid answer for each indicator wins (the file records which site supplied which
+number):
+
+```bash
+python -m app.consensus_fetcher                    # next unreleased report
+python -m app.consensus_fetcher --date 23-09-2026  # a specific release date
+```
+
+Consensus is usually only published close to the release; before that the
+command exits non-zero with the reason instead of writing partial data.
+"Consensus" is TradingEconomics' *Consensus* and investing.com's *Forecast* (the
+same figure), named `consensus` throughout.
 
 ## Where the URLs live
 
@@ -74,7 +91,7 @@ with TradingEconomicsScraper() as s:
 with InvestingCalendarScraper() as s:
     s.fetch_release("eia-crude-oil-inventories-75", "23-09-2026")
 # {'release_date': '23-09-2026', 'time': '08:00 PM', 'actual': 2.969,
-#  'forecast': -0.6 (TE) / -0.7 (investing), 'previous': -0.64}
+#  'consensus': -0.6 (TE) / -0.7 (investing), 'previous': -0.64}
 ```
 
 Or from the command line:

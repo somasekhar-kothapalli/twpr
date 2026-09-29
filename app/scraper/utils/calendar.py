@@ -62,6 +62,13 @@ def latest_released_row(rows):
     return max(released, key=lambda r: parse_date(r["release_date"])) if released else None
 
 
+def pending_row(rows):
+    """The next upcoming release: the earliest-dated row whose actual hasn't
+    printed yet. None if every row is released."""
+    pending = [r for r in rows or [] if r["actual"] is None and parse_date(r["release_date"])]
+    return min(pending, key=lambda r: parse_date(r["release_date"])) if pending else None
+
+
 def row_for_release(rows, release_date=None):
     """The calendar row released on `release_date` (DD-MM-YYYY by default; ISO or
     a date also accepted), or None. With no date, the latest released row. Exact

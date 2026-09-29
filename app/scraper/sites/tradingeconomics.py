@@ -1,6 +1,6 @@
 """TradingEconomics indicator-page scraper. Returns the same response as
 scraper.sites.investing.InvestingCalendarScraper (shape defined in
-scraper.utils.base); only `forecast` may differ. Driven through a real browser
+scraper.utils.base); only `consensus` may differ. Driven through a real browser
 via scraper.browser.
 
 Two table shapes exist on TE indicator pages (verified live against real
@@ -44,20 +44,20 @@ class TradingEconomicsScraper(CalendarScraper):
     def parse_stats(self, soup, rows):
         # investing.com's "Latest Release" widget is the latest released row, so
         # use the same source. The stats table rounds (2.97 vs 2.969) and has no
-        # forecast; it is only the fallback for pages with no calendar table.
+        # consensus; it is only the fallback for pages with no calendar table.
         latest = latest_released_row(rows)
         if latest:
-            return {"actual_mb": latest["actual"], "forecast_mb": latest["forecast"],
+            return {"actual_mb": latest["actual"], "consensus_mb": latest["consensus"],
                     "previous_mb": latest["previous"]}
         return parse_stats_table(soup)
 
 
 def parse_calendar_rows(soup):
     """All `tr.an-estimate-row` rows, in document order, as dicts:
-    {release_date, time, actual, forecast, previous} - same shape as
+    {release_date, time, actual, consensus, previous} - same shape as
     investing.py's parse_row(), so both sites' calendar rows are
     interchangeable for callers. `time` is the row's GMT column
-    converted to IST. `actual`/`forecast`/`previous` are floats in
+    converted to IST. `actual`/`consensus`/`previous` are floats in
     million barrels (None for not-yet-released/not-yet-locked cells).
     Empty list if the page has no calendar table at all.
     """
@@ -70,7 +70,7 @@ def parse_calendar_rows(soup):
             "release_date": format_date(tds[0].get_text(strip=True)),
             "time": gmt_to_ist(tds[1].get_text(strip=True)),
             "actual": to_mb_suffixed(tds[4].get_text(strip=True)),
-            "forecast": to_mb_suffixed(tds[6].get_text(strip=True)),
+            "consensus": to_mb_suffixed(tds[6].get_text(strip=True)),
             "previous": to_mb_suffixed(tds[5].get_text(strip=True)),
         })
     return rows

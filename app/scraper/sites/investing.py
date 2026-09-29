@@ -28,6 +28,7 @@ class InvestingCalendarScraper(CalendarScraper):
     base_url = INVESTING_BASE
     wait_selector = OCCURRENCE_TABLE_SELECTOR
     page_gap_s = 10
+    session_gap_s = 60  # pause between separate browser sessions (it 403/429s back-to-back ones)
 
     def parse_rows(self, soup):
         table = soup.find("table", {"data-test": "occurrence-table"})
@@ -57,7 +58,7 @@ def parse_row(row):
         "release_date": format_date(release_date),
         "time": gmt_to_ist(cells[1].get_text(strip=True)),
         "actual": to_mb_suffixed(cells[2].get_text(strip=True)),
-        "forecast": to_mb_suffixed(cells[3].get_text(strip=True)),
+        "consensus": to_mb_suffixed(cells[3].get_text(strip=True)),
         "previous": to_mb_suffixed(cells[4].get_text(strip=True)),
     }
 
@@ -79,13 +80,14 @@ def _label_value(soup, label_text):
 
 def parse_stats(soup):
     """The "Latest Release" summary widget above the occurrence table:
-    Actual/Forecast/Previous for the most recent report. Returns
-    {actual_mb, forecast_mb, previous_mb}, all None if the widget isn't
+    Actual/Forecast/Previous for the most recent report (investing.com's
+    "Forecast" is our `consensus`). Returns
+    {actual_mb, consensus_mb, previous_mb}, all None if the widget isn't
     present on this page.
     """
     return {
         "actual_mb": to_mb_suffixed(_label_value(soup, "Actual") or ""),
-        "forecast_mb": to_mb_suffixed(_label_value(soup, "Forecast") or ""),
+        "consensus_mb": to_mb_suffixed(_label_value(soup, "Forecast") or ""),
         "previous_mb": to_mb_suffixed(_label_value(soup, "Previous") or ""),
     }
 
