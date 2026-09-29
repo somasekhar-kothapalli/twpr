@@ -119,7 +119,7 @@ def fetch_eia_actuals(release_date=None, sites=SITES, make_scraper=scraper_for,
                    optional=("refinery",), grace_s=grace_s)
     site, candidate = decided["report"]
     refinery = decided["refinery"][1]["value"] if "refinery" in decided else None
-    logger.info("%s returned the complete report first; refinery change: %s", site, refinery)
+    logger.info("%s returned the complete report first", site)
     return {
         **candidate,
         "refinery_util_change_pct": refinery,
@@ -152,10 +152,12 @@ def main(argv=None):
             "fetched_at": now_ist().strftime(TIME_FORMAT),
         }
         write_json(EIA_ACTUALS_FILE, payload)
+        refinery = payload["refinery_util_change_pct"]
         logger.info(
-            "EIA %s (%s): crude %+.3f | cushing %+.3f | gasoline %+.3f | distillate %+.3f",
+            "EIA %s (%s): crude %+.3f | cushing %+.3f | gasoline %+.3f | distillate %+.3f | refinery util change %s",
             payload["release_date"], payload["source"], payload["crude_change_mb"],
             payload["cushing_change_mb"], payload["gasoline_change_mb"], payload["distillate_change_mb"],
+            f"{refinery:+.1f}%" if refinery is not None else "n/a",
         )
         return 0
     except Exception:  # noqa: BLE001 - top-level guard
