@@ -235,8 +235,16 @@ a guess. Expired contracts log a yfinance 404 (harmless).
 ### `app/model.py`, `app/surprise_history.py`, `utils/eia_levels.py` — runbook inputs
 
 - `model.py` is pure: `tls` (weights w_g 0.67, 0.80 May-Sep; w_d 0.50, 0.70 Nov-Feb, by the
-  release month), `sigma_forecast(history)` (sample std dev of the last 12 weekly TLS; **raises
-  under 8 weeks**, never guesses) and `z_score`.
+  release month), `sigma_forecast(history, method="mad")` (spread of the last 12 weekly TLS;
+  **raises under 8 weeks**, never guesses) and `z_score`.
+- **Sigma method (a deliberate deviation from the runbook's literal "std dev"):** the default
+  is `mad` = 1.4826 x median absolute deviation, because the 12-08-2026 week (TLS +20 mb)
+  alone lifted the plain std dev to ~7.8-8.3 mb and would have locked out real signals for 12
+  weeks. On the 9 weeks we have, MAD (~4.6) matches the std dev with that week removed (~4.6);
+  at a 1.25 gate that is |TLS| >= ~5.7 instead of ~9.7. `SIGMA_METHOD=std` in `.env` restores
+  the plain std dev; a zero MAD falls back to std; `calculations.sigma_method` records which
+  set the gate. The gate is still strict in this volatile window: the 23-09 week (TLS +2.23)
+  stands down either way.
 - `surprise_history.py` keeps `data/surprise_history.json` (`SURPRISE_HISTORY_FILE`): per release,
   crude/gasoline/distillate surprise = actual - consensus. `--backfill` reads investing.com (~10
   past releases, three paced sessions; TE only shows ~3) and never overwrites existing weeks;
@@ -259,7 +267,7 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
 (delta, expiry gate, lots, DST-aware IST clock); the engine loads, validates and assembles.
 
 - **Decision:** TLS = crude + w_g x gasoline + w_d x distillate surprise; `Z = TLS / sigma`,
-  sigma = std dev of the last 12 weekly TLS **excluding the week being traded** (needs >= 8
+  sigma = spread (MAD by default, see above) of the last 12 weekly TLS **excluding the week being traded** (needs >= 8
   weeks, else Telegram error + exit 1). |Z| < 1.25 -> stand down (inclusive at 1.25).
   Cushing contradicting the headline -> Regime 2, the fade (direction opposite the
   headline, checked first). Regime 3 = EIA draw beat consensus but fell short of an extreme
@@ -291,10 +299,9 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
   data by `fetched_at`) are refused unless `--allow-stale`. All three liquids' consensus and
   actuals plus `api_crude_mb` are mandatory; Cushing, Cushing level and refinery are optional.
   After writing, the engine appends the week to the surprise history (idempotent).
-- **Live finding (2026-09-30):** the history's 12-08-2026 week has a +19.9 mb TLS, so sigma
-  is ~8.3 mb (4.9 without it) and a trade needs |TLS| above ~6-10 mb. The 23-09 reference week
-  (TLS +2.23, Z +0.27) therefore **stands down**. That is what the runbook's rolling std dev
-  does with a wild week in the window; it rolls out after 12 weeks.
+- **Live finding (2026-09-30):** the history's 12-08-2026 week has a +19.9 mb TLS. With the plain
+  std dev sigma was ~8.3 mb; the default MAD gives ~5.8 on the 8 prior weeks, so a trade needs
+  |TLS| above ~7 mb. The 23-09 reference week (TLS +2.23) **stands down** under any method.
 - **api_monitor replay limit:** replaying an old API report (`--date`) is rejected once TE's
   "Related" snapshot has moved on to a newer release; the sim reuses the earlier
   `api_report.json`.

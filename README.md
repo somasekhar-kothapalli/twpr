@@ -111,6 +111,9 @@ python -m app.signal_engine                # the five data files -> data/signal.
 python -m app.signal_engine --allow-stale  # replay older files
 ```
 
+`SIGMA_METHOD` (`mad`, the default, or `std`) sets how the Z-score's noise floor is measured;
+`mad` keeps one freak week from locking out real signals for 12 weeks.
+
 Set `ACCOUNT_EQUITY_INR` in `.env` for lot sizing (and `MAX_LOTS=1` for the runbook's
 first-three-weeks cap). Needs `GROQ_API_KEY` (and a `GROQ_MODEL` your account can use)
 for the narrative, and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for alerts. All optional.

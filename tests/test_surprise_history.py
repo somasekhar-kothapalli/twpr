@@ -29,11 +29,38 @@ def test_history_tls_uses_the_month_of_that_release():
     assert model.history_tls(row("22-07-2026", 0, 1.0, 0)) == pytest.approx(0.80)
 
 
-def test_sigma_is_the_sample_std_dev_of_the_last_twelve_weeks():
+def test_std_method_is_the_sample_std_dev_of_the_last_twelve_weeks():
     days = [f"{d:02d}-03-2026" for d in range(1, 29)]
     history = [row(d, float(i)) for i, d in enumerate(days)]            # crude only: TLS == crude
-    assert model.sigma_forecast(history) == pytest.approx(statistics.stdev(range(16, 28)))   # last 12
-    assert model.sigma_forecast(list(reversed(history))) == pytest.approx(statistics.stdev(range(16, 28)))  # order-free
+    assert model.sigma_forecast(history, method="std") == pytest.approx(statistics.stdev(range(16, 28)))   # last 12
+    assert model.sigma_forecast(list(reversed(history)), method="std") == pytest.approx(statistics.stdev(range(16, 28)))
+
+
+def weekly(*crude):
+    return [row(f"{d:02d}-03-2026", c) for d, c in enumerate(crude, start=1)]
+
+
+def test_mad_method_shrugs_off_one_freak_week_but_std_does_not():
+    normal = [1.0, -2.0, 3.0, -1.0, 2.0, -3.0, 1.5, -0.5]
+    calm, freak = weekly(*normal), weekly(*normal[:-1], 20.0)
+    std_jump = model.sigma_forecast(freak, method="std") / model.sigma_forecast(calm, method="std")
+    mad_jump = model.sigma_forecast(freak) / model.sigma_forecast(calm)         # default is "mad"
+    assert std_jump > 3 and mad_jump < 1.5
+
+
+def test_mad_is_1_4826_times_the_median_absolute_deviation():
+    history = weekly(1, 2, 3, 4, 5, 6, 7, 8)             # median 4.5, |dev| median 2.0
+    assert model.sigma_forecast(history) == pytest.approx(1.4826 * 2.0)
+
+
+def test_zero_mad_falls_back_to_std_instead_of_dividing_by_zero():
+    history = weekly(1, 1, 1, 1, 1, 1, 1, 9)             # MAD 0, but not a flat series
+    assert model.sigma_forecast(history) == pytest.approx(statistics.stdev([1, 1, 1, 1, 1, 1, 1, 9]))
+
+
+def test_unknown_sigma_method_is_refused():
+    with pytest.raises(ValueError, match="sigma method"):
+        model.sigma_forecast(weekly(*range(8)), method="mean")
 
 
 def test_sigma_refuses_a_short_history():

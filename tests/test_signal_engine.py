@@ -240,12 +240,30 @@ def test_sigma_excludes_the_week_being_traded_and_refuses_a_short_history(tmp_pa
     write(tmp_path, rows=rows)
     sigma, weeks = load_sigma("23-09-2026", tmp_path)
     assert weeks == 10 and sigma == pytest.approx(model.sigma_forecast(rows))
+    assert load_sigma("23-09-2026", tmp_path, method="std")[0] == pytest.approx(model.sigma_forecast(rows, method="std"))
     same = load_sigma(rows[-1]["release_date"], tmp_path)          # the traded week is left out
     assert same[1] == 9
     write(tmp_path, rows=history(5))
     with pytest.raises(InputError, match="needs 8 weeks") as err:
         load_sigma("23-09-2026", tmp_path)
     assert err.value.title == "Not enough surprise history"
+
+
+def test_sigma_method_defaults_to_mad_and_rejects_typos(monkeypatch):
+    monkeypatch.delenv("SIGMA_METHOD", raising=False)
+    assert se.sigma_method() == "mad"
+    monkeypatch.setenv("SIGMA_METHOD", "STD")
+    assert se.sigma_method() == "std"
+    monkeypatch.setenv("SIGMA_METHOD", "# mad or std")            # dotenv placeholder = unset
+    assert se.sigma_method() == "mad"
+    monkeypatch.setenv("SIGMA_METHOD", "mean")
+    with pytest.raises(InputError, match="SIGMA_METHOD"):
+        se.sigma_method()
+
+
+def test_signal_records_which_sigma_method_set_the_gate():
+    assert signal()["calculations"]["sigma_method"] == "mad"
+    assert build_signal(INPUTS, MARKET, SIGMA, 84.0, "fallback", analyse=stub(), sigma_method="std")["calculations"]["sigma_method"] == "std"
 
 
 def test_account_settings_are_optional_but_never_silently_wrong(monkeypatch):
@@ -384,6 +402,7 @@ def patch_main(monkeypatch, tmp_path):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.delenv("ACCOUNT_EQUITY_INR", raising=False)
     monkeypatch.delenv("MAX_LOTS", raising=False)
+    monkeypatch.delenv("SIGMA_METHOD", raising=False)
     fake_yfinance(monkeypatch, price=84.0)
     alerts, recorded = [], []
     monkeypatch.setattr(se, "send_error", lambda script, msg: alerts.append((script, msg)))

@@ -200,12 +200,20 @@ def load_equity():
     return read("ACCOUNT_EQUITY_INR", float), read("MAX_LOTS", int)
 
 
-def load_sigma(release_date, data_dir=None):
+def sigma_method():
+    """SIGMA_METHOD from .env: "mad" (default, robust) or "std" (plain std dev)."""
+    method = (env("SIGMA_METHOD", "mad") or "mad").lower()
+    if method not in model.SIGMA_METHODS:
+        raise InputError("Invalid setting", f"SIGMA_METHOD={method!r} must be one of {model.SIGMA_METHODS}")
+    return method
+
+
+def load_sigma(release_date, data_dir=None, method="mad"):
     """(sigma_forecast, weeks used) from the surprise history, excluding the week being traded."""
     data_dir = data_dir or DATA_DIR
     history = [r for r in load_history(data_dir / SURPRISE_HISTORY_FILE.name) if r["release_date"] != release_date]
     try:
-        return model.sigma_forecast(history), min(len(history), model.SIGMA_WEEKS)
+        return model.sigma_forecast(history, method=method), min(len(history), model.SIGMA_WEEKS)
     except ValueError as exc:
         raise InputError("Not enough surprise history", str(exc)) from exc
 
@@ -302,7 +310,7 @@ def scorecard(market, api_surprise):
 
 
 def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, equity_inr=None, max_lots=None,
-                 analyse=generate_analysis, generated_at=None):
+                 analyse=generate_analysis, generated_at=None, sigma_method="mad"):
     """The full signal.json payload from validated inputs, market data and sigma_forecast."""
     release_day = parse_release_date(inputs["release_date"])
     month = release_day.month
@@ -324,7 +332,7 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, equity_inr=None
         "crude_surprise_mb": surprises["crude"], "gasoline_surprise_mb": surprises["gasoline"],
         "distillate_surprise_mb": surprises["distillate"],
         "omega_gasoline": model.omega_gasoline(month), "omega_distillate": model.omega_distillate(month),
-        "tls_mb": round(tls, 3), "sigma_forecast_mb": round(sigma, 3), "z_tls": round(z, 2),
+        "tls_mb": round(tls, 3), "sigma_forecast_mb": round(sigma, 3), "sigma_method": sigma_method, "z_tls": round(z, 2),
         "cushing_contradicts": contradicts, "cushing_multiplier": round(multiplier, 3),
         "cushing_level_known": inputs["cushing_level_mb"] is not None,
         "api_surprise_mb": api_surprise, "api_aligns": (tls > 0) == (inputs["api_crude_mb"] > 0),
@@ -381,18 +389,19 @@ def main(argv=None):
     try:
         inputs = load_inputs(allow_stale=args.allow_stale)
         market = load_market(allow_stale=args.allow_stale)
-        sigma, weeks = load_sigma(inputs["release_date"])
+        method = sigma_method()
+        sigma, weeks = load_sigma(inputs["release_date"], method=method)
         equity, max_lots = load_equity()
         if equity is None:
             logger.warning("ACCOUNT_EQUITY_INR not set - no lot sizing in the signal")
         usd_inr, source = fetch_usd_inr()
-        signal = build_signal(inputs, market, sigma, usd_inr, source, equity, max_lots)
+        signal = build_signal(inputs, market, sigma, usd_inr, source, equity, max_lots, sigma_method=method)
         write_json(SIGNAL_FILE, signal)
         record_week(inputs, inputs)   # this week's surprises join the history (no-op if already there)
         s, c = signal["signal"], signal["calculations"]
-        logger.info("signal for %s: %s | regime %s %s | TLS %+.3f Z %+.2f (sigma %.3f, %d wks) | %s %s | model %s",
+        logger.info("signal for %s: %s | regime %s %s | TLS %+.3f Z %+.2f (sigma %.3f %s, %d wks) | %s %s | model %s",
                     signal["release_date"], s["action"], s["regime"], s["direction"], c["tls_mb"], c["z_tls"],
-                    c["sigma_forecast_mb"], weeks, s["option_type"], s["strike_type"], signal["model_used"])
+                    c["sigma_forecast_mb"], c["sigma_method"], weeks, s["option_type"], s["strike_type"], signal["model_used"])
         return 0
     except InputError as exc:
         logger.error("%s", exc)

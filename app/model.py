@@ -35,14 +35,34 @@ def history_tls(row):
     return tls(row["crude_surprise_mb"], row["gasoline_surprise_mb"], row["distillate_surprise_mb"], month)
 
 
-def sigma_forecast(history, weeks=SIGMA_WEEKS, min_weeks=SIGMA_MIN_WEEKS):
-    """Sample std dev of the last `weeks` weekly TLS values in `history`.
-    ValueError if fewer than `min_weeks` weeks exist: never gate a trade on a guess."""
+SIGMA_METHODS = ("mad", "std")
+MAD_TO_SIGMA = 1.4826   # scales a median absolute deviation to a std dev for normal data
+
+
+def sigma_forecast(history, weeks=SIGMA_WEEKS, min_weeks=SIGMA_MIN_WEEKS, method="mad"):
+    """Spread of the last `weeks` weekly TLS values in `history`, the yardstick for the Z gate.
+
+    method "mad" (default): 1.4826 x median absolute deviation. One freak week (the 12-08-2026
+        TLS was +20 mb) cannot inflate the noise floor for the next 12 weeks and lock out every
+        real signal; it is the runbook's std dev with outliers discounted.
+    method "std": the plain sample standard deviation (the runbook's literal wording). Also the
+        fallback when the MAD is 0 (identical values), which would make every Z infinite.
+
+    ValueError if fewer than `min_weeks` weeks exist or the method is unknown: never gate a
+    trade on a guess."""
+    if method not in SIGMA_METHODS:
+        raise ValueError(f"sigma method must be one of {SIGMA_METHODS}, got {method!r}")
     recent = sorted(history, key=lambda r: datetime.strptime(r["release_date"], DATE_FORMAT))[-weeks:]
     if len(recent) < min_weeks:
         raise ValueError(f"sigma_forecast needs {min_weeks} weeks of surprise history, have {len(recent)} "
                          "- run: python -m app.surprise_history --backfill")
-    return statistics.stdev(history_tls(r) for r in recent)
+    values = [history_tls(r) for r in recent]
+    if method == "mad":
+        median = statistics.median(values)
+        mad = MAD_TO_SIGMA * statistics.median(abs(v - median) for v in values)
+        if mad > 0:
+            return mad
+    return statistics.stdev(values)
 
 
 def z_score(tls_value, sigma):
