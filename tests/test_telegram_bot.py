@@ -32,8 +32,8 @@ def test_regime_1_message_has_everything_needed_to_act():
         "Cushing: +2.266 mb (confirms), level 23.7 mb, x1.39",
         "API crude: +1.786 mb (aligns)",
         "Option: delta 0.80-0.85 (OVX 53.7 above 35, deep ITM) | expiry 19-10-2026 (26d)",
-        "Expected WTI move: -2.01 USD = -168 INR on MCX (USD/INR 84.00, yfinance)",
-        "outside the 0.15-0.30 USD/mb anchor",
+        "Expected WTI move (beta_vol): -2.01 USD = -168 INR on MCX (USD/INR 84.00, yfinance), 0.90 USD per mb",
+        "Anchor (0.15-0.30 USD per mb): -0.33 to -0.67 USD = -28 to -56 INR - beta_vol is outside it",
         "Risk 1% = INR 10,000 | lots by futures stop:",
         "$0.18: 8 | $0.25: 5 | $0.35: 4",
         "IST: print 20:00 | time stop 20:35 | hard exit 22:30 | chop exit 4 min",
@@ -50,13 +50,14 @@ def test_bullish_message_and_calm_market_without_deepening():
                                    gasoline_change_mb=-1.0, distillate_change_mb=-1.0, cushing_change_mb=-1.0,
                                    api_crude_mb=-1.0))
     assert text.splitlines()[0] == "🟢 TWPR SIGNAL - Regime 1 Bullish: CALL ITM"
-    assert "Option: delta 0.60-0.70 |" in text and "deep ITM" not in text and "anchor" not in text
+    assert "Option: delta 0.60-0.70 |" in text and "deep ITM" not in text and "is outside it" not in text
+    assert "Anchor (0.15-0.30 USD per mb): +" in text
 
 
 def test_regime_2_says_targets_are_chart_levels():
-    text = tb.format_signal(signal(cushing_change_mb=-0.5, cushing_level_mb=40.0))
+    text = tb.format_signal(signal(cushing_change_mb=-1.5, cushing_level_mb=40.0))
     assert text.splitlines()[0] == "🟢 TWPR SIGNAL - Regime 2 Bullish: CALL ITM"
-    assert "Cushing: -0.500 mb (contradicts)" in text and "Targets: chart levels" in text and "Expected WTI move" not in text
+    assert "Cushing: -1.500 mb (contradicts)" in text and "Targets: chart levels" in text and "Expected WTI move" not in text
 
 
 def test_missing_equity_says_how_to_get_lot_sizing():

@@ -58,7 +58,8 @@ def arm(monkeypatch, market=None, error=None):
 
 
 MARKET = {"as_of": "29-09-2026", "wti": 89.63, "atr_20": 2.5, "ovx": 54.9,
-          "cl1_cl2": 2.24, "crack_321": 30.0, "brent_wti": 6.4, "dxy": 101.6, "fetched_at": "30-09-2026 10:00"}
+          "cl1_cl2": 2.24, "crack_321": 30.0, "brent_wti": 6.4, "dxy": 101.6, "overnight_rally_usd": 0.6,
+          "fetched_at": "30-09-2026 10:00"}
 
 
 def test_main_writes_the_market_file(monkeypatch):
@@ -79,3 +80,57 @@ def test_a_failing_scorecard_input_becomes_null_not_a_failure():
         raise RuntimeError("down")
     assert md.optional("DXY", broken) is None
     assert md.optional("DXY", lambda: 101.6) == 101.6
+
+
+# ------------------------------------------------------------ overnight rally (Regime 3)
+
+from datetime import datetime, timedelta, timezone   # noqa: E402
+
+NY = md.NEW_YORK
+
+
+def ny(y, m, d, hh, mm):
+    return datetime(y, m, d, hh, mm, tzinfo=NY)
+
+
+def test_last_api_time_is_the_most_recent_tuesday_1630_new_york():
+    wednesday_morning = ny(2026, 9, 30, 10, 0)
+    assert md.last_api_time(wednesday_morning) == ny(2026, 9, 29, 16, 30)
+    assert md.last_api_time(ny(2026, 9, 29, 16, 30)) == ny(2026, 9, 29, 16, 30)         # exactly then
+    assert md.last_api_time(ny(2026, 9, 29, 15, 0)) == ny(2026, 9, 22, 16, 30)          # Tuesday, before the print
+    assert md.last_api_time(ny(2026, 10, 2, 9, 0)) == ny(2026, 9, 29, 16, 30)           # Friday
+    assert md.last_api_time(wednesday_morning.astimezone(timezone.utc)) == ny(2026, 9, 29, 16, 30)   # UTC in, NY out
+
+
+def test_price_at_uses_the_open_of_the_last_bar_and_refuses_a_gap():
+    bars = [(ny(2026, 9, 29, 16, 25), 88.0), (ny(2026, 9, 29, 16, 30), 88.2), (ny(2026, 9, 29, 16, 35), 88.4)]
+    assert md.price_at(bars, ny(2026, 9, 29, 16, 30)) == 88.2
+    assert md.price_at(bars, ny(2026, 9, 29, 16, 32)) == 88.2
+    assert md.price_at(bars, ny(2026, 9, 29, 16, 20)) is None                            # nothing yet
+    assert md.price_at(bars, ny(2026, 9, 29, 17, 30)) is None                            # last bar is 55 min old
+
+
+def make_bars():
+    """5-minute opens: 88.00 at Tue 16:30 ET, drifting to 89.60 by Wed 09:55, 90.50 just after the print."""
+    bars, moment = [], ny(2026, 9, 29, 16, 30)
+    while moment <= ny(2026, 9, 30, 11, 0):
+        if not (moment.hour == 17):                                                      # the daily break
+            frac = (moment - ny(2026, 9, 29, 16, 30)) / timedelta(hours=17)
+            price = 88.0 + 1.6 * min(frac, 1.0) if moment < ny(2026, 9, 30, 10, 30) else 90.5
+            bars.append((moment, price))
+        moment += timedelta(minutes=5)
+    return bars
+
+
+def test_overnight_rally_is_measured_up_to_the_print_and_never_past_it():
+    bars = make_bars()
+    before = md.overnight_rally(bars, ny(2026, 9, 30, 10, 0))
+    assert before["api_price"] == 88.0 and 1.4 < before["rally_usd"] < 1.7
+    after = md.overnight_rally(bars, ny(2026, 9, 30, 11, 0))                             # run after the print
+    assert after["pre_print_price"] < 90.0 and after["rally_usd"] < 1.7                  # the post-print jump is excluded
+
+
+def test_overnight_rally_is_none_when_either_price_is_missing():
+    assert md.overnight_rally([], ny(2026, 9, 30, 10, 0)) is None
+    only_later = [(ny(2026, 9, 30, 9, 0), 89.0)]
+    assert md.overnight_rally(only_later, ny(2026, 9, 30, 10, 0)) is None                # no price at the API time

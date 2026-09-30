@@ -77,6 +77,8 @@ def z_score(tls_value, sigma):
 Z_MIN = 1.25                     # trade only if |Z_TLS| >= this (inclusive)
 API_PREPOSITIONED_MB = 3.0       # |API - consensus| above this: the market is pre-positioned
 SANITY_PER_MB_USD = (0.15, 0.30)  # empirical anchor: USD/bbl move per 1.0 mb of TLS
+CUSHING_MATERIAL_MB = 1.0        # a Cushing move smaller than this neither confirms nor contradicts
+RALLY_MIN_USD = 1.00             # Regime 3: WTI rallied more than this from the API print to the EIA print
 
 
 def cushing_multiplier(level_mb):
@@ -92,12 +94,26 @@ def cushing_multiplier(level_mb):
     return 1.0
 
 
-def cushing_contradicts(tls_value, cushing_change_mb):
-    """True if Cushing moves against the headline: a build (TLS > 0) with a Cushing draw, or a
-    draw with a Cushing build. Exactly 0 contradicts nothing; None when Cushing is unknown."""
+def cushing_contradicts(tls_value, cushing_change_mb, material_mb=CUSHING_MATERIAL_MB):
+    """True if Cushing moves against the headline by at least `material_mb`: a build (TLS > 0) with
+    a Cushing draw, or a draw with a Cushing build. A smaller move is noise (False, so a +0.1 mb
+    Cushing build cannot turn a -8 mb crude draw into a fade); None when Cushing is unknown.
+    The 1.0 mb threshold is an addition to the runbook, chosen after an external review."""
     if cushing_change_mb is None:
         return None
+    if abs(cushing_change_mb) < material_mb:
+        return False
     return (tls_value > 0 and cushing_change_mb < 0) or (tls_value < 0 and cushing_change_mb > 0)
+
+
+def cushing_status(tls_value, cushing_change_mb, material_mb=CUSHING_MATERIAL_MB):
+    """'contradicts', 'confirms', 'immaterial' (moved less than `material_mb`) or 'unknown'."""
+    contradicts = cushing_contradicts(tls_value, cushing_change_mb, material_mb)
+    if contradicts is None:
+        return "unknown"
+    if contradicts:
+        return "contradicts"
+    return "immaterial" if abs(cushing_change_mb) < material_mb else "confirms"
 
 
 def beta_vol(atr_20, ovx):
@@ -110,26 +126,39 @@ def expected_move_usd(tls_value, beta, multiplier):
     return -tls_value * beta * multiplier
 
 
+def anchor_move_usd(tls_value):
+    """The empirical anchor as a range: (smaller, larger) USD/bbl move, signed like -TLS."""
+    sign = -1 if tls_value > 0 else 1
+    return tuple(round(sign * per_mb * abs(tls_value), 2) for per_mb in SANITY_PER_MB_USD)
+
+
 def sanity_ok(tls_value, move_usd):
     """Step 6: is the move within the 0.15-0.30 USD per mb of TLS anchor?"""
     per_mb = abs(move_usd) / abs(tls_value)
     return SANITY_PER_MB_USD[0] <= per_mb <= SANITY_PER_MB_USD[1]
 
 
-def classify(tls_value, z, cushing_is_contradicting, crude_change, crude_consensus, api_crude):
+def regime3_setup(tls_value, crude_change, crude_consensus, api_crude):
+    """The inventory half of Regime 3: an EIA draw that beat consensus but fell short of an extreme
+    (more than 3.0 mb below consensus) API draw. The market half is the overnight rally."""
+    return bool(tls_value < 0 and crude_change < crude_consensus
+                and api_crude - crude_consensus < -API_PREPOSITIONED_MB and crude_change > api_crude)
+
+
+def classify(tls_value, z, cushing_is_contradicting, crude_change, crude_consensus, api_crude,
+             overnight_rally_usd=None):
     """(regime, direction), regime None = stand down. Direction is the trade's:
       stand down  |Z| < 1.25                                   neutral
       Regime 2    Cushing contradicts the headline (checked first): the FADE, opposite of headline
-      Regime 3    EIA draw beat consensus but fell short of an extreme (>3.0 mb) API draw: sell the fact
-      Regime 1    otherwise: with the headline (build = bearish, draw = bullish)
-    Regime 3's overnight-rally condition (> $1.00) cannot be read from data: it goes on the checklist."""
+      Regime 3    `regime3_setup` AND a measured overnight rally above $1.00: sell the fact (PUT).
+                  A rally that is unknown (no data) or too small does NOT fire Regime 3.
+      Regime 1    otherwise: with the headline (build = bearish, draw = bullish)"""
     if abs(z) < Z_MIN:
         return None, "neutral"
     headline = "bearish" if tls_value > 0 else "bullish"
     if cushing_is_contradicting:
         return 2, "bullish" if headline == "bearish" else "bearish"
-    api_surprise = api_crude - crude_consensus
-    if (tls_value < 0 and crude_change < crude_consensus and api_surprise < -API_PREPOSITIONED_MB
-            and crude_change > api_crude):
+    if (regime3_setup(tls_value, crude_change, crude_consensus, api_crude)
+            and overnight_rally_usd is not None and overnight_rally_usd > RALLY_MIN_USD):
         return 3, "bearish"
     return 1, headline

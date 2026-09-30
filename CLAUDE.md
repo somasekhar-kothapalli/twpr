@@ -269,14 +269,22 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
 - **Decision:** TLS = crude + w_g x gasoline + w_d x distillate surprise; `Z = TLS / sigma`,
   sigma = spread (MAD by default, see above) of the last 12 weekly TLS **excluding the week being traded** (needs >= 8
   weeks, else Telegram error + exit 1). |Z| < 1.25 -> stand down (inclusive at 1.25).
-  Cushing contradicting the headline -> Regime 2, the fade (direction opposite the
+  Cushing contradicting the headline **by at least 1.0 mb** (`CUSHING_MATERIAL_MB`; a smaller
+  opposite move is `immaterial`, so +0.1 mb cannot turn a -8 mb draw into a fade - an addition
+  to the runbook after an external review) -> Regime 2, the fade (direction opposite the
   headline, checked first). Regime 3 = EIA draw beat consensus but fell short of an extreme
-  (> 3.0 mb) API draw -> PUT; its overnight-rally condition (> $1.00) is on the checklist,
-  not data. Otherwise Regime 1, with the headline (build -> PUT, draw -> CALL).
+  (> 3.0 mb) API draw **and** WTI rallied more than $1.00 from the API print to the EIA
+  print (`market.json: overnight_rally_usd`, from Yahoo 5-minute bars, Tuesday 16:30 ET ->
+  Wednesday 10:30 ET) -> PUT. If the rally is unknown or too small, Regime 3 does **not**
+  fire (Regime 1 instead) and the checklist says why. Otherwise Regime 1, with the headline
+  (build -> PUT, draw -> CALL). The rally assumes a Tuesday -> Wednesday pair; a holiday-shifted
+  release and a contract roll inside the window are not modelled.
 - **Expected move** (`-TLS x beta_vol x Cushing multiplier`, x USD/INR for MCX) is given for
-  Regime 1 only; Regimes 2 and 3 target chart levels. `sanity_ok` says whether it sits in
-  the 0.15-0.30 USD per mb anchor; **at OVX ~54 it does not** (~0.9), and the Telegram
-  message says so. Unknown Cushing level -> multiplier 1.0, `cushing_level_known: false`.
+  Regime 1 only; Regimes 2 and 3 target chart levels. The 0.15-0.30 USD per mb anchor is
+  shown **beside** it (`anchor_low/high_usd/inr`) and `sanity_ok` says whether beta_vol falls
+  inside it; **at OVX ~54 it does not** (~0.9 vs the anchor's ~0.3-0.7 for TLS 2.2). Neither
+  vetoes the trade: the move feeds the message, not sizing or entries. An external review
+  called beta_vol "pseudo-math" with no theoretical basis. Unknown Cushing level -> multiplier 1.0, `cushing_level_known: false`.
 - **Option:** ITM only. Delta 0.60-0.70, or 0.80-0.85 when OVX is strictly above 35.
   Expiry = the nearest 19th (`MCX_EXPIRY_DAY`, **an assumption** from README section 13 -
   confirm on your chain), rolled to next month when 5 or fewer days remain. No option-chain

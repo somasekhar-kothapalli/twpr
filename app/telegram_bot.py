@@ -59,7 +59,7 @@ def format_signal(signal, replay_days=None):
         ]
     else:
         icon = BULLISH if trade["direction"] == "bullish" else BEARISH
-        cushing = {True: "contradicts", False: "confirms", None: "unknown"}[calc["cushing_contradicts"]]
+        cushing = calc["cushing_status"]
         level = inputs.get("cushing_level_mb")
         option, move, schedule = signal["option"], signal["expected_move"], signal["schedule"]
         lines += [
@@ -79,9 +79,11 @@ def format_signal(signal, replay_days=None):
             + (", rolled" if option["rolled"] else "") + ")",
         ]
         if move:
-            lines.append(f"Expected WTI move: {move['wti_usd']:+.2f} USD = {move['mcx_inr']:+,} INR on MCX "
-                         f"(USD/INR {move['usd_inr']:.2f}, {move['usd_inr_source']})"
-                         + ("" if move["sanity_ok"] else f" - outside the 0.15-0.30 USD/mb anchor ({move['per_mb_usd']:.2f}), recheck"))
+            lines.append(f"Expected WTI move (beta_vol): {move['wti_usd']:+.2f} USD = {move['mcx_inr']:+,} INR on MCX "
+                         f"(USD/INR {move['usd_inr']:.2f}, {move['usd_inr_source']}), {move['per_mb_usd']:.2f} USD per mb")
+            lines.append(f"Anchor (0.15-0.30 USD per mb): {move['anchor_low_usd']:+.2f} to {move['anchor_high_usd']:+.2f} USD"
+                         f" = {move['anchor_low_inr']:+,} to {move['anchor_high_inr']:+,} INR"
+                         + ("" if move["sanity_ok"] else " - beta_vol is outside it"))
         else:
             lines.append("Targets: chart levels (no modelled move for this regime)")
         lines += _format_sizing(signal["sizing"])

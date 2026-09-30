@@ -51,6 +51,8 @@ def test_reference_week_is_regime_1_bearish_put_with_deep_itm_delta():
 def test_expected_move_is_negative_for_a_build_and_flags_the_sanity_band():
     move = signal()["expected_move"]
     assert move["wti_usd"] == pytest.approx(-2.005, abs=0.01) and move["mcx_inr"] == -168   # at 84.0
+    assert (move["anchor_low_usd"], move["anchor_high_usd"]) == (-0.33, -0.67)                # 0.15 / 0.30 per mb
+    assert (move["anchor_low_inr"], move["anchor_high_inr"]) == (-28, -56)
     assert move["per_mb_usd"] > 0.30 and move["sanity_ok"] is False        # OVX 54 pushes it past 0.15-0.30
     calm = signal(market={**MARKET, "ovx": 30.0, "atr_20": 2.0})
     assert calm["expected_move"]["sanity_ok"] is True and calm["option"]["ovx_deepened"] is False
@@ -65,9 +67,9 @@ def test_small_surprise_relative_to_sigma_stands_down_with_no_trade_detail():
 
 
 def test_cushing_contradiction_routes_to_regime_2_and_fades_the_headline():
-    s = signal(cushing_change_mb=-0.5, cushing_level_mb=40.0)
+    s = signal(cushing_change_mb=-1.5, cushing_level_mb=40.0)
     assert (s["signal"]["regime"], s["signal"]["direction"], s["signal"]["option_type"]) == (2, "bullish", "CALL")
-    assert s["calculations"]["cushing_contradicts"] is True
+    assert s["calculations"]["cushing_contradicts"] is True and s["calculations"]["cushing_status"] == "contradicts"
     assert s["expected_move"] is None                      # targets are chart levels
     assert any("FADE" in line for line in s["checklist"])
 
@@ -80,12 +82,31 @@ def test_bullish_regime_1_call_with_a_positive_expected_move():
     assert any("CL1-CL2 to widen" in line for line in s["checklist"])
 
 
-def test_regime_3_sell_the_fact_when_the_eia_draw_falls_short_of_an_extreme_api_draw():
-    s = signal(crude_change_mb=-1.0, gasoline_change_mb=-3.0, distillate_change_mb=-2.0,
-               cushing_change_mb=-1.0, api_crude_mb=-5.0)
+REGIME_3 = dict(crude_change_mb=-1.0, gasoline_change_mb=-3.0, distillate_change_mb=-2.0,
+                cushing_change_mb=-1.0, api_crude_mb=-5.0)
+
+
+def test_regime_3_sell_the_fact_when_the_eia_draw_falls_short_of_an_extreme_api_draw_and_wti_rallied():
+    s = signal(market={**MARKET, "overnight_rally_usd": 1.8}, **REGIME_3)
     assert (s["signal"]["regime"], s["signal"]["direction"], s["signal"]["option_type"]) == (3, "bearish", "PUT")
     assert s["scorecard"]["api_prepositioned"] is True and s["expected_move"] is None
-    assert any("overnight rally" in line for line in s["checklist"])
+    assert s["calculations"]["overnight_rally_usd"] == 1.8 and s["calculations"]["regime3_setup"] is True
+    assert any("rally is confirmed" in line for line in s["checklist"])
+
+
+@pytest.mark.parametrize("rally,said", [(None, "unknown"), (0.4, "only +0.40 USD")])
+def test_regime_3_setup_without_a_confirmed_rally_falls_back_to_regime_1_and_says_why(rally, said):
+    s = signal(market={**MARKET, "overnight_rally_usd": rally}, **REGIME_3)
+    assert (s["signal"]["regime"], s["signal"]["direction"]) == (1, "bullish")
+    assert s["calculations"]["regime3_setup"] is True
+    assert said in s["checklist"][0] and "not fired" in s["checklist"][0]
+
+
+def test_a_small_opposite_cushing_move_does_not_turn_a_big_headline_into_a_fade():
+    s = signal(crude_change_mb=-8.0, cushing_change_mb=0.1, gasoline_change_mb=-1.0, distillate_change_mb=-1.0,
+               api_crude_mb=-1.0)
+    assert s["signal"]["regime"] == 1 and s["signal"]["direction"] == "bullish"
+    assert s["calculations"]["cushing_contradicts"] is False and s["calculations"]["cushing_status"] == "immaterial"
 
 
 def test_unknown_cushing_data_is_neutral_not_a_route_to_regime_2():

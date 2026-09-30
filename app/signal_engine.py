@@ -77,8 +77,8 @@ REGIME_CHECK = {
     2: ["Regime 2 (FADE, lower conviction): do NOT trade the initial spike. Wait for a stall at prior daily "
         "high/low or Value Area, then a 1-min close back inside the pre-release range. "
         "Targets: opposite side of the range, then session POC. Size down without a clean confirmation candle."],
-    3: ["Regime 3 (sell the fact): confirm the Tuesday API draw drove an overnight rally above $1.00, "
-        "then short only on a cross below the 09:00 ET cash-open VWAP."],
+    3: ["Regime 3 (sell the fact): the overnight rally is confirmed (see calculations.overnight_rally_usd); "
+        "short only on a cross below the 09:00 ET cash-open VWAP."],
 }
 
 
@@ -253,7 +253,7 @@ def fmt_optional(value):
 
 
 def build_prompt(inputs, calc, signal):
-    status = {True: "contradicts", False: "confirms", None: "unknown"}[calc["cushing_contradicts"]]
+    status = calc["cushing_status"]
     return (
         f"Release: {inputs['release_date']}\n"
         f"Decision: {signal['action']} | Regime: {signal['regime']} | Direction: {signal['direction']}\n"
@@ -327,18 +327,22 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, equity_inr=None
     tls = model.tls(surprises["crude"], surprises["gasoline"], surprises["distillate"], month)
     z = model.z_score(tls, sigma)
     contradicts = model.cushing_contradicts(tls, inputs["cushing_change_mb"])
+    rally = market.get("overnight_rally_usd")
     multiplier = model.cushing_multiplier(inputs["cushing_level_mb"])
     beta = model.beta_vol(market["atr_20"], market["ovx"])
     api_surprise = round(inputs["api_crude_mb"] - inputs["crude_consensus_mb"], 3)
     regime, direction = model.classify(tls, z, contradicts, inputs["crude_change_mb"],
-                                       inputs["crude_consensus_mb"], inputs["api_crude_mb"])
+                                       inputs["crude_consensus_mb"], inputs["api_crude_mb"], rally)
+    setup3 = model.regime3_setup(tls, inputs["crude_change_mb"], inputs["crude_consensus_mb"], inputs["api_crude_mb"])
 
     calc = {
         "crude_surprise_mb": surprises["crude"], "gasoline_surprise_mb": surprises["gasoline"],
         "distillate_surprise_mb": surprises["distillate"],
         "omega_gasoline": model.omega_gasoline(month), "omega_distillate": model.omega_distillate(month),
         "tls_mb": round(tls, 3), "sigma_forecast_mb": round(sigma, 3), "sigma_method": sigma_method, "z_tls": round(z, 2),
-        "cushing_contradicts": contradicts, "cushing_multiplier": round(multiplier, 3),
+        "cushing_contradicts": contradicts, "cushing_status": model.cushing_status(tls, inputs["cushing_change_mb"]),
+        "cushing_multiplier": round(multiplier, 3),
+        "regime3_setup": setup3, "overnight_rally_usd": rally,
         "cushing_level_known": inputs["cushing_level_mb"] is not None,
         "api_surprise_mb": api_surprise, "api_aligns": (tls > 0) == (inputs["api_crude_mb"] > 0),
         "beta_vol": round(beta, 3),
@@ -357,9 +361,16 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, equity_inr=None
             sizing = options.sizing(equity_inr, usd_inr, (low, high), max_lots)
         if regime == 1:   # Regimes 2 and 3 target chart levels, not a modelled move
             usd = model.expected_move_usd(tls, beta, multiplier)
+            anchor = model.anchor_move_usd(tls)
             move = {"wti_usd": round(usd, 2), "mcx_inr": int(round(usd * usd_inr)),
-                    "per_mb_usd": round(abs(usd) / abs(tls), 3), "sanity_ok": model.sanity_ok(tls, usd)}
+                    "per_mb_usd": round(abs(usd) / abs(tls), 3), "sanity_ok": model.sanity_ok(tls, usd),
+                    "anchor_low_usd": anchor[0], "anchor_high_usd": anchor[1],
+                    "anchor_low_inr": int(round(anchor[0] * usd_inr)), "anchor_high_inr": int(round(anchor[1] * usd_inr))}
         checklist = REGIME_CHECK[regime] + ALWAYS_CHECK
+        if setup3 and regime != 3:
+            checklist.insert(0, "Regime 3 inventory setup is present but the overnight rally is "
+                             + ("unknown" if rally is None else f"only {rally:+.2f} USD (needs more than +1.00)")
+                             + ", so it was not fired.")
     schedule = options.release_schedule(release_day)
     fx = {"usd_inr": round(usd_inr, 2), "usd_inr_source": usd_inr_source}
 

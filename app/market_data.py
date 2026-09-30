@@ -4,6 +4,7 @@
     ovx           Cboe crude oil volatility index                        (beta_vol + strike delta)
     cl1_cl2       front minus second WTI contract, USD/bbl               (scorecard, time-spread filter)
     crack_321     3:2:1 crack spread, USD/bbl                            (scorecard)
+    overnight_rally_usd  WTI move from the API print (Tue 16:30 ET) to the EIA print   (Regime 3)
     brent_wti     Brent minus WTI, USD/bbl                               (scorecard)
     dxy           US dollar index                                        (context)
 
@@ -16,10 +17,12 @@ Run from the repo root:
 """
 import logging
 import sys
+from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-from app.utils.common import MARKET_FILE, ROOT, fmt, fmt_ts, now_ist, setup_logging, write_json
+from app.utils.common import MARKET_FILE, ROOT, fmt, fmt_ts, now_ist, now_utc, setup_logging, write_json
 from app.utils.telegram import send_exception
 
 logger = logging.getLogger("twpr.market_data")
@@ -29,6 +32,10 @@ FETCH_TIMEOUT_S = 15
 MONTH_CODES = "FGHJKMNQUVXZ"   # CME futures month codes, Jan..Dec
 FRONT_TOLERANCE = 0.25         # USD; a live quote can move between two fetches
 BARRELS_PER_GALLON = 42       # RBOB and heating oil are quoted in USD/gallon
+NEW_YORK = ZoneInfo("America/New_York")
+API_TIME_ET = (16, 30)         # API report, Tuesday
+PRINT_ET = (10, 30)            # EIA report, the next morning
+MAX_BAR_GAP = timedelta(minutes=45)   # older than this and there is no price "at" the moment
 
 
 def true_ranges(bars):
@@ -74,6 +81,46 @@ def front_second(front_close, closes_by_symbol):
             second = closes_by_symbol[symbols[i + 1]]
             return (close, second) if second is not None else None
     return None
+
+
+def last_api_time(now):
+    """The most recent Tuesday 16:30 New York time at or before `now` (an aware datetime)."""
+    local = now.astimezone(NEW_YORK)
+    tuesday = (local - timedelta(days=(local.weekday() - 1) % 7)).replace(
+        hour=API_TIME_ET[0], minute=API_TIME_ET[1], second=0, microsecond=0)
+    return tuesday if tuesday <= local else tuesday - timedelta(days=7)
+
+
+def price_at(bars, moment):
+    """Open of the last bar starting at or before `moment`, or None if that bar is more than
+    MAX_BAR_GAP old (a gap in the data is not a price). `bars` = [(aware start time, open)]."""
+    earlier = [(start, price) for start, price in bars if start <= moment]
+    if not earlier or moment - earlier[-1][0] > MAX_BAR_GAP:
+        return None
+    return earlier[-1][1]
+
+
+def overnight_rally(bars, now):
+    """WTI's move from the API print (Tuesday 16:30 ET) to just before the EIA print (10:30 ET the
+    next morning, or `now` if that is earlier), or None if either price is missing. Assumes the
+    usual Tuesday -> Wednesday pair: a holiday-shifted release is not modelled."""
+    api_time = last_api_time(now)
+    print_time = min(now.astimezone(NEW_YORK), (api_time + timedelta(days=1)).replace(
+        hour=PRINT_ET[0], minute=PRINT_ET[1]))
+    # the bar that opens AT the print already contains the reaction, so stop one second earlier
+    start, end = price_at(bars, api_time), price_at(bars, print_time - timedelta(seconds=1))
+    if start is None or end is None:
+        return None
+    return {"rally_usd": round(end - start, 2), "api_price": round(start, 2), "pre_print_price": round(end, 2)}
+
+
+def intraday_bars(ticker, period="5d", interval="5m"):
+    """[(aware start time, open)] for a yfinance ticker, oldest first."""
+    import yfinance as yf
+    frame = yf.Ticker(ticker).history(period=period, interval=interval, timeout=FETCH_TIMEOUT_S).dropna()
+    if frame.empty:
+        raise RuntimeError(f"no intraday data for {ticker}")
+    return [(ts.to_pydatetime(), float(row.Open)) for ts, row in zip(frame.index, frame.itertuples())]
 
 
 def history(ticker, period="3mo"):
@@ -123,6 +170,10 @@ def fetch_market(today=None):
     market["brent_wti"] = optional("Brent-WTI", lambda: round(last_close("BZ=F")[0] - wti, 2))
     market["crack_321"] = optional("3:2:1 crack", lambda: round(crack_321(wti, last_close("RB=F")[0], last_close("HO=F")[0]), 2))
     market["dxy"] = optional("DXY", lambda: round(last_close("DX-Y.NYB")[0], 2))
+    move = optional("overnight rally", lambda: overnight_rally(intraday_bars("CL=F"), now_utc()))
+    market["overnight_rally_usd"] = move["rally_usd"] if move else None
+    market["overnight_api_price"] = move["api_price"] if move else None
+    market["overnight_pre_print_price"] = move["pre_print_price"] if move else None
     market["fetched_at"] = fmt_ts(now_ist())
     return market
 
@@ -137,9 +188,9 @@ def main():
         logger.error("market data failed: %s", exc)
         send_exception("market_data.py", exc)
         return 1
-    logger.info("market %s: WTI %.2f | ATR20 %.3f | OVX %.2f | CL1-CL2 %s | crack %s | Brent-WTI %s | DXY %s",
+    logger.info("market %s: WTI %.2f | ATR20 %.3f | OVX %.2f | CL1-CL2 %s | crack %s | Brent-WTI %s | DXY %s | overnight rally %s",
                 market["as_of"], market["wti"], market["atr_20"], market["ovx"], market["cl1_cl2"],
-                market["crack_321"], market["brent_wti"], market["dxy"])
+                market["crack_321"], market["brent_wti"], market["dxy"], market.get("overnight_rally_usd"))
     return 0
 
 
