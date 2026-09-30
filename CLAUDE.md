@@ -353,7 +353,9 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
 - **Expected move** (`-TLS x beta_vol x Cushing multiplier`, x USD/INR for MCX) is given for
   Regime 1 only; Regimes 2 and 3 target chart levels. The 0.15-0.30 USD per mb anchor is
   shown **beside** it (`anchor_low/high_usd/inr`) and `sanity_ok` says whether beta_vol falls
-  inside it; **at OVX ~54 it does not** (~0.9 vs the anchor's ~0.3-0.7 for TLS 2.2). Neither
+  inside it (changed after a what-if preview: the message now LEADS with the anchor range and shows beta_vol as
+  a marked footnote, "unproven", because at TLS +11.8 beta_vol said -9.65 USD = 270% of the band; the band line
+  is measured on the top of the anchor); **at OVX ~54 it does not** (~0.9 vs the anchor's ~0.3-0.7 for TLS 2.2). Neither
   vetoes the trade: the move feeds the message, not sizing or entries. `expected_move.band` sets the
   beta_vol move against MCX's 4% futures price limit (Rs ~ WTI x USD/INR; the limit widens to 6% then 9%),
   as a share of the band, and flags `near_band` at 75% or more: a locked futures market can freeze the
@@ -367,8 +369,12 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
   (only the 2026 list is loaded).
   Rolled to next month when 5 or fewer days remain. No option-chain
   feed exists: the strike is left to you (pick the ITM strike whose delta is in range).
-- **Sizing (changed 2026-09-30):** no equity math any more. You set `MCX_CRUDEOIL_LOT_SIZE` and/or
-  `MCX_CRUDEOILM_LOT_SIZE` (whole numbers of lots you trade per signal; both unset -> `sizing: null` and
+- **Sizing (changed 2026-09-30):** no equity math any more. **Two kinds of setting, easy to confuse:**
+  `MCX_CRUDEOIL_LOT_SIZE=100` / `MCX_CRUDEOILM_LOT_SIZE=10` are MCX's *contract sizes* in barrels (validated: any
+  other crude value is refused with a pointer to the lots setting; the natural gas sizes are reserved and only
+  need to be whole numbers), while `MCX_CRUDEOIL_LOTS` / `MCX_CRUDEOILM_LOTS` are *how many lots you trade* (I once
+  read the SIZE settings as lot counts and the preview showed 100 crude lots). You set the lot counts
+  (whole numbers you trade per signal; both unset -> `sizing: null` and
   the message says how to set them) and `sizing.contracts` shows, per configured contract,
   `risk_inr_by_futures_stop_usd`: what those lots lose if the option stop is hit,
   `lots x futures stop x USD/INR x mid delta x barrels per lot` (CRUDEOIL 100 bbl, CRUDEOILM 10 bbl;
@@ -378,7 +384,7 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
   `MCX_NATURALGAS_LOT_SIZE` and `MCX_NATURALGASM_LOT_SIZE` (mini) are loaded and validated but **reserved**:
   nothing reads them (crude only).
   MCX lists options on the mini contract (`CRUDEOILM`, underlying the 10 bbl mini futures; confirmed by its March
-  2026 specification), so `MCX_CRUDEOILM_LOT_SIZE` is usable; the maths uses 10 bbl a lot.
+  2026 specification), so `MCX_CRUDEOILM_LOTS` is usable; the maths uses 10 bbl a lot.
 - **Not automated (on `checklist`):** time-spread and dealer-gamma filters, the retest entry,
   the real stop, FX/RBI and geopolitical aborts, OI pinning haircut. The pre-release
   `scorecard` is informational: the runbook doesn't say how a miss changes the trade.

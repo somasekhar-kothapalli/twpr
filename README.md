@@ -114,10 +114,11 @@ python -m app.signal_engine --allow-stale  # replay older files
 `SIGMA_METHOD` (`mad`, the default, or `std`) sets how the Z-score's noise floor is measured;
 `mad` keeps one freak week from locking out real signals for 12 weeks.
 
-Set `MCX_CRUDEOIL_LOT_SIZE` in `.env` (the lots you trade per signal; the runbook's
+Set `MCX_CRUDEOIL_LOTS` in `.env` (how many lots you trade per signal; the runbook's
 validation window is 1) and the message shows what those lots lose in INR if the option stop is hit.
-`MCX_CRUDEOILM_LOT_SIZE` does the same for the mini contract (10 bbl a lot). `MCX_NATURALGAS_LOT_SIZE` and
-`MCX_NATURALGASM_LOT_SIZE` are reserved for a future natural gas setup. Needs `GROQ_API_KEY` (and a `GROQ_MODEL` your account can use)
+`MCX_CRUDEOILM_LOTS` does the same for the mini contract. `MCX_CRUDEOIL_LOT_SIZE` (100) and
+`MCX_CRUDEOILM_LOT_SIZE` (10) are MCX's contract sizes in barrels, checked against the published values;
+`MCX_NATURALGAS_LOT_SIZE` and `MCX_NATURALGASM_LOT_SIZE` are reserved for a future natural gas setup. Needs `GROQ_API_KEY` (and a `GROQ_MODEL` your account can use)
 for the narrative, and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for alerts. All optional.
 
 ## Release day

@@ -36,10 +36,11 @@ def test_regime_1_message_has_everything_needed_to_act():
         "| futures ~INR 7,535 | ATM 7,550",
         "Rupee: USD/INR +0.62% over 5 sessions (inr weakening), dampens this trade - INR sharply weakened 0.62% over 5 sessions, "
         "working against a bearish MCX move.",
-        "Expected WTI move (beta_vol): -2.01 USD = -168 INR on MCX (USD/INR 84.00, yfinance), 0.90 USD per mb",
-        "Anchor (0.15-0.30 USD per mb): -0.33 to -0.67 USD = -28 to -56 INR - beta_vol is outside it",
-        "MCX limit: futures band 4% = INR 301 (on ~INR 7,535/bbl); the beta_vol move is 2.2% of price = 56% of the band; "
-        "the limit widens to 6% then 9%",
+        "Expected WTI move (anchor 0.15-0.30 USD per mb of TLS): -0.33 to -0.67 USD = -28 to -56 INR on MCX "
+        "(USD/INR 84.00, yfinance)",
+        "MCX limit: futures band 4% = INR 301 (on ~INR 7,535/bbl); the top of that range is 0.8% of price = 19% of the "
+        "band; the limit widens to 6% then 9%",
+        "Model (beta_vol, unproven): -2.01 USD = -168 INR, 0.90 USD per mb - outside the anchor",
         "CRUDEOIL: 2 lots x 100 bbl | INR lost if the option stop is hit, by futures stop:",
         "$0.18: 2,495 | $0.25: 3,465 | $0.35: 4,851",
         "CRUDEOILM: 3 lots x 10 bbl | INR lost if the option stop is hit, by futures stop:",
@@ -58,8 +59,8 @@ def test_bullish_message_and_calm_market_without_deepening():
                                    gasoline_change_mb=-1.0, distillate_change_mb=-1.0, cushing_change_mb=-1.0,
                                    api_crude_mb=-1.0))
     assert text.splitlines()[0] == "🟢 TWPR SIGNAL - Regime 1 Bullish: CALL ITM"
-    assert "Option: delta 0.60-0.70 |" in text and "deep ITM" not in text and "is outside it" not in text
-    assert "Anchor (0.15-0.30 USD per mb): +" in text
+    assert "Option: delta 0.60-0.70 |" in text and "deep ITM" not in text and "outside the anchor" not in text
+    assert "Expected WTI move (anchor 0.15-0.30 USD per mb of TLS): +" in text
 
 
 def test_regime_2_says_targets_are_chart_levels():
@@ -81,7 +82,7 @@ def test_an_assumed_expiry_is_marked_in_the_message():
 
 
 def test_missing_lot_count_says_how_to_set_it():
-    assert "Lots: set MCX_CRUDEOIL_LOT_SIZE (or MCX_CRUDEOILM_LOT_SIZE) in .env" in tb.format_signal(signal())
+    assert "Lots: set MCX_CRUDEOIL_LOTS (or MCX_CRUDEOILM_LOTS) in .env" in tb.format_signal(signal())
 
 
 def test_unknown_cushing_reads_unknown_not_a_crash():
@@ -160,3 +161,15 @@ def test_main_reports_failure_when_telegram_itself_fails(monkeypatch, tmp_path):
     sent, errors = arm(monkeypatch, tmp_path, fresh_signal())
     monkeypatch.setattr(tb, "send_message", lambda text: False)
     assert tb.main([]) == 1
+
+
+def test_a_huge_surprise_no_longer_headlines_an_absurd_beta_vol_move():
+    """At TLS +11.8 beta_vol says -8.6 USD (well beyond the 4% band); the message leads with the anchor and keeps
+    beta_vol as a marked footnote, and the band is measured on the anchor's top end (which really is ~80% of it)."""
+    text = tb.format_signal(signal(crude_change_mb=7.5, gasoline_change_mb=0.6, distillate_change_mb=1.5,
+                                   cushing_change_mb=2.4, api_crude_mb=1.019))
+    lines = text.splitlines()
+    move = next(i for i, l in enumerate(lines) if l.startswith("Expected WTI move (anchor"))
+    assert lines[move + 1].startswith("MCX limit:") and lines[move + 2].startswith("Model (beta_vol, unproven):")
+    assert "= 80% of the band - CLOSE to a circuit stop" in lines[move + 1]      # a real warning, on a realistic number
+    assert "outside the anchor" in lines[move + 2]

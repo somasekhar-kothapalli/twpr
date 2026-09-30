@@ -136,8 +136,8 @@ The pipeline in this repo produces the pre-release inputs and the signal; the op
 | Expiry gate (> 5 days) | Automated from MCX's 2026 expiry calendar (option expiry = 2 business days before the futures expiry); 2027 on is a flagged guess; 2026 holidays loaded |
 | Evening session closed on release day | Warned in the signal and the message (`mcx_evening_open`); the trade itself cannot be placed |
 | ITM strike selection | **Manual**, aided by an estimate: no option-chain feed, so the signal gives Black-76 strikes for the target deltas (OVX as IV, futures = WTI x USD/INR, Rs 50 grid) to aim your search; confirm on the live chain |
-| USD → INR → premium stop, INR risk of your lots | Automated per futures stop for the lots you set in `MCX_CRUDEOIL_LOT_SIZE`; the real stop is read off the chart, and the 1% check is yours |
-| 1-lot rule for the validation window | Set `MCX_CRUDEOIL_LOT_SIZE=1` in `.env` |
+| USD → INR → premium stop, INR risk of your lots | Automated per futures stop for the lots you set in `MCX_CRUDEOIL_LOTS` / `MCX_CRUDEOILM_LOTS`; the real stop is read off the chart, and the 1% check is yours |
+| 1-lot rule for the validation window | Set `MCX_CRUDEOILM_LOTS=1` (or `MCX_CRUDEOIL_LOTS=1`) in `.env` |
 | Limit-only entries, retest timing, 50% scale-out, 4-minute chop exit | **Manual** (listed on the signal's checklist); `app.watch` reminds you of the entry window, the 35-minute time stop and the hard exit, but cannot see your premium |
 | INR basis abort, 50% geopolitical size-down | **Manual** checklist items. The INR item is now a fair-value check (MCX futures near WTI x USD/INR): the onshore FX market is shut during the hold, so the RBI cannot act in the window; the signal also shows the 5-session rupee trend and whether it helps or hurts the trade |
 | Hard exit and time stop times | Automated (DST-aware, capped an hour before the close), shown in the message; `app.watch` sends the reminders |

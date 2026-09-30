@@ -11,7 +11,7 @@ import pytest
 from app import model
 from app import signal_engine as se
 from app.signal_engine import (InputError, build_signal, fetch_usd_inr, generate_analysis, load_inputs,
-                               load_lot_sizes, load_market, load_sigma)
+                               load_lot_counts, load_lot_sizes, load_market, load_sigma)
 
 # The 23-09-2026 report: crude +3.569 vs consensus, Cushing +2.266 at a 23.748 mb level, OVX 53.7.
 INPUTS = {
@@ -59,7 +59,7 @@ def test_expected_move_is_negative_for_a_build_and_flags_the_sanity_band():
     assert (move["anchor_low_inr"], move["anchor_high_inr"]) == (-28, -56)
     band = move["band"]                                                                       # WTI 89.7 x 84 INR
     assert (band["futures_price_inr"], band["band_inr"], band["near_band"]) == (7535, 301, False)
-    assert band["move_share_of_band"] == pytest.approx(0.56, abs=0.01)
+    assert band["move_share_of_band"] == pytest.approx(0.19, abs=0.01)         # the top of the anchor range, not beta_vol
     assert signal(market={**MARKET, "wti": None})["expected_move"]["band"] is None            # no price: no band
     assert move["per_mb_usd"] > 0.30 and move["sanity_ok"] is False        # OVX 54 pushes it past 0.15-0.30
     calm = signal(market={**MARKET, "ovx": 30.0, "atr_20": 2.0})
@@ -303,23 +303,38 @@ def test_signal_records_which_sigma_method_set_the_gate():
 
 def test_lot_settings_are_optional_but_never_silently_wrong(monkeypatch):
     names = ("MCX_CRUDEOIL_LOT_SIZE", "MCX_CRUDEOILM_LOT_SIZE", "MCX_NATURALGAS_LOT_SIZE",
-             "MCX_NATURALGASM_LOT_SIZE")
+             "MCX_NATURALGASM_LOT_SIZE", "MCX_CRUDEOIL_LOTS", "MCX_CRUDEOILM_LOTS")
     for name in names:
         monkeypatch.delenv(name, raising=False)
     assert load_lot_sizes() == {"CRUDEOIL": None, "CRUDEOILM": None, "NATURALGAS": None, "NATURALGASM": None}
-    monkeypatch.setenv("MCX_CRUDEOIL_LOT_SIZE", "2")
+    assert load_lot_counts() == {"CRUDEOIL": None, "CRUDEOILM": None}
+    monkeypatch.setenv("MCX_CRUDEOIL_LOT_SIZE", "100")                     # the contract sizes MCX publishes
     monkeypatch.setenv("MCX_CRUDEOILM_LOT_SIZE", "10")
-    monkeypatch.setenv("MCX_NATURALGAS_LOT_SIZE", "1")
-    monkeypatch.setenv("MCX_NATURALGASM_LOT_SIZE", "5")
-    assert load_lot_sizes() == {"CRUDEOIL": 2, "CRUDEOILM": 10, "NATURALGAS": 1, "NATURALGASM": 5}
-    monkeypatch.setenv("MCX_CRUDEOIL_LOT_SIZE", "# lots per signal")       # dotenv placeholder = unset
-    assert load_lot_sizes()["CRUDEOIL"] is None
+    monkeypatch.setenv("MCX_NATURALGAS_LOT_SIZE", "1250")                  # reserved: any positive whole number
+    monkeypatch.setenv("MCX_NATURALGASM_LOT_SIZE", "250")
+    assert load_lot_sizes() == {"CRUDEOIL": 100, "CRUDEOILM": 10, "NATURALGAS": 1250, "NATURALGASM": 250}
+    monkeypatch.setenv("MCX_CRUDEOIL_LOTS", "2")
+    monkeypatch.setenv("MCX_CRUDEOILM_LOTS", "10")
+    assert load_lot_counts() == {"CRUDEOIL": 2, "CRUDEOILM": 10}
+    monkeypatch.setenv("MCX_CRUDEOIL_LOTS", "# lots per signal")            # dotenv placeholder = unset
+    assert load_lot_counts()["CRUDEOIL"] is None
     for name in names:
         for bad in ("two", "1.5", "0", "-1"):
             monkeypatch.setenv(name, bad)
             with pytest.raises(InputError, match=name):
-                load_lot_sizes()
+                (load_lot_counts if name.endswith("LOTS") else load_lot_sizes)()
         monkeypatch.delenv(name)
+
+
+@pytest.mark.parametrize("name,wrong,lots_name", [("MCX_CRUDEOIL_LOT_SIZE", "1", "MCX_CRUDEOIL_LOTS"),
+                                                   ("MCX_CRUDEOIL_LOT_SIZE", "2", "MCX_CRUDEOIL_LOTS"),
+                                                   ("MCX_CRUDEOILM_LOT_SIZE", "100", "MCX_CRUDEOILM_LOTS")])
+def test_a_lot_size_that_is_not_the_exchanges_is_refused_and_points_to_the_lots_setting(monkeypatch, name, wrong, lots_name):
+    """The usual mistake: putting the NUMBER of lots in a SIZE setting (LOT_SIZE=100 next to LOTS=... is right)."""
+    monkeypatch.setenv(name, wrong)
+    with pytest.raises(InputError, match=lots_name) as err:
+        load_lot_sizes()
+    assert "barrels" in err.value.detail
 
 
 # ----------------------------------------------------- external calls (all stubbed)
@@ -513,6 +528,8 @@ def patch_main(monkeypatch, tmp_path):
     monkeypatch.delenv("MCX_CRUDEOILM_LOT_SIZE", raising=False)
     monkeypatch.delenv("MCX_NATURALGAS_LOT_SIZE", raising=False)
     monkeypatch.delenv("MCX_NATURALGASM_LOT_SIZE", raising=False)
+    monkeypatch.delenv("MCX_CRUDEOIL_LOTS", raising=False)
+    monkeypatch.delenv("MCX_CRUDEOILM_LOTS", raising=False)
     monkeypatch.delenv("SIGMA_METHOD", raising=False)
     monkeypatch.delenv("FREECURRENCYAPI_KEY", raising=False)
     fake_yfinance(monkeypatch, price=84.0)
@@ -524,7 +541,7 @@ def patch_main(monkeypatch, tmp_path):
 
 def test_main_writes_signal_json_records_the_week_and_sends_nothing(monkeypatch, tmp_path):
     alerts, recorded = patch_main(monkeypatch, tmp_path)
-    monkeypatch.setenv("MCX_CRUDEOIL_LOT_SIZE", "1")
+    monkeypatch.setenv("MCX_CRUDEOIL_LOTS", "1")
     write(tmp_path)
     assert se.main(["--allow-stale"]) == 0
     saved = json.loads((tmp_path / "signal.json").read_text(encoding="utf-8"))
@@ -600,3 +617,11 @@ def test_a_stand_down_has_no_strike_guide_or_rupee_block():
 def test_without_a_wti_price_there_is_no_strike_guide_but_the_signal_still_ships():
     s = signal(market={**MARKET, "wti": None})
     assert s["signal"]["action"] == "trade" and "strike_guide" not in s["option"]
+
+
+def test_main_refuses_a_lot_count_typed_into_a_lot_size_setting(monkeypatch, tmp_path):
+    alerts, recorded = patch_main(monkeypatch, tmp_path)
+    monkeypatch.setenv("MCX_CRUDEOIL_LOT_SIZE", "2")
+    write(tmp_path)
+    assert se.main(["--allow-stale"]) == 1 and not (tmp_path / "signal.json").exists() and recorded == []
+    assert "MCX_CRUDEOIL_LOTS" in alerts[0][1]

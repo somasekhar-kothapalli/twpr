@@ -203,7 +203,8 @@ def sizing(lots_by_contract, usd_inr, delta_range):
 
 
 def band_context(move_inr, futures_inr):
-    """The expected move against MCX's 4% futures price limit. `futures_inr` is the futures price in
+    """A move (in Rs per barrel; the signal passes the TOP of the anchor range) against MCX's 4% futures price
+    limit. `futures_inr` is the futures price in
     Rs/bbl (approximately WTI x USD/INR). The limit is measured from the previous settlement and
     the day may already have moved, so this is the move's size against a full band, not a forecast
     of what is left. A locked futures market can freeze the options too."""

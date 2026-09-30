@@ -31,7 +31,7 @@ def _mb(value):
 
 def _format_sizing(sizing):
     if not sizing:
-        return ["Lots: set MCX_CRUDEOIL_LOT_SIZE (or MCX_CRUDEOILM_LOT_SIZE) in .env to see what your lots risk"]
+        return ["Lots: set MCX_CRUDEOIL_LOTS (or MCX_CRUDEOILM_LOTS) in .env to see what your lots risk"]
     lines = []
     for name, block in sizing["contracts"].items():
         risk = " | ".join(f"${stop}: {inr:,}" for stop, inr in block["risk_inr_by_futures_stop_usd"].items())
@@ -96,18 +96,18 @@ def format_signal(signal, replay_days=None):
                          f"{rupee['effect']} this trade") + ("" if not rupee["notes"] or trend is None else
                                                              " - " + " ".join(rupee["notes"])))
         if move:
-            lines.append(f"Expected WTI move (beta_vol): {move['wti_usd']:+.2f} USD = {move['mcx_inr']:+,} INR on MCX "
-                         f"(USD/INR {move['usd_inr']:.2f}, {move['usd_inr_source']}), {move['per_mb_usd']:.2f} USD per mb")
-            lines.append(f"Anchor (0.15-0.30 USD per mb): {move['anchor_low_usd']:+.2f} to {move['anchor_high_usd']:+.2f} USD"
-                         f" = {move['anchor_low_inr']:+,} to {move['anchor_high_inr']:+,} INR"
-                         + ("" if move["sanity_ok"] else " - beta_vol is outside it"))
+            lines.append(f"Expected WTI move (anchor 0.15-0.30 USD per mb of TLS): {move['anchor_low_usd']:+.2f} to "
+                         f"{move['anchor_high_usd']:+.2f} USD = {move['anchor_low_inr']:+,} to {move['anchor_high_inr']:+,} INR "
+                         f"on MCX (USD/INR {move['usd_inr']:.2f}, {move['usd_inr_source']})")
             band = move.get("band")
             if band:
                 lines.append(f"MCX limit: futures band {band['band_pct']:.0f}% = INR {band['band_inr']:,} "
-                             f"(on ~INR {band['futures_price_inr']:,}/bbl); the beta_vol move is "
+                             f"(on ~INR {band['futures_price_inr']:,}/bbl); the top of that range is "
                              f"{band['move_pct_of_price']:.1f}% of price = {band['move_share_of_band']:.0%} of the band"
                              + (" - CLOSE to a circuit stop" if band["near_band"] else "")
                              + "; the limit widens to 6% then 9%")
+            lines.append(f"Model (beta_vol, unproven): {move['wti_usd']:+.2f} USD = {move['mcx_inr']:+,} INR, "
+                         f"{move['per_mb_usd']:.2f} USD per mb" + ("" if move["sanity_ok"] else " - outside the anchor"))
         else:
             lines.append("Targets: chart levels (no modelled move for this regime)")
         lines += _format_sizing(signal["sizing"])

@@ -191,27 +191,43 @@ def load_market(data_dir=None, today=None, allow_stale=False):
     return market
 
 
-LOT_SETTINGS = {"CRUDEOIL": "MCX_CRUDEOIL_LOT_SIZE", "CRUDEOILM": "MCX_CRUDEOILM_LOT_SIZE",
-                "NATURALGAS": "MCX_NATURALGAS_LOT_SIZE", "NATURALGASM": "MCX_NATURALGASM_LOT_SIZE"}
+LOT_SIZE_SETTINGS = {"CRUDEOIL": "MCX_CRUDEOIL_LOT_SIZE", "CRUDEOILM": "MCX_CRUDEOILM_LOT_SIZE",
+                     "NATURALGAS": "MCX_NATURALGAS_LOT_SIZE", "NATURALGASM": "MCX_NATURALGASM_LOT_SIZE"}
+LOT_COUNT_SETTINGS = {"CRUDEOIL": "MCX_CRUDEOIL_LOTS", "CRUDEOILM": "MCX_CRUDEOILM_LOTS"}
+
+
+def _whole_number(name, what):
+    """The setting as an int of at least 1, None if unset; InputError otherwise."""
+    raw = env(name)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        raise InputError("Invalid setting", f"{name}={raw!r} is not a whole number of {what}") from None
+    if value < 1:
+        raise InputError("Invalid setting", f"{name} must be at least 1, got {raw!r}")
+    return value
 
 
 def load_lot_sizes():
-    """{contract: lots or None}: the lots you trade per signal, from MCX_CRUDEOIL_LOT_SIZE,
-    MCX_CRUDEOILM_LOT_SIZE (the mini contract, 10 bbl a lot), MCX_NATURALGAS_LOT_SIZE and
-    MCX_NATURALGASM_LOT_SIZE. Whole numbers of at least 1, or None if unset. The two natural gas values
-    are reserved for a future setup: nothing reads them yet."""
-    def read(name):
-        raw = env(name)
-        if raw is None:
-            return None
-        try:
-            value = int(raw)
-        except ValueError:
-            raise InputError("Invalid setting", f"{name}={raw!r} is not a whole number of lots") from None
-        if value < 1:
-            raise InputError("Invalid setting", f"{name} must be at least 1, got {raw!r}")
-        return value
-    return {contract: read(name) for contract, name in LOT_SETTINGS.items()}
+    """{contract: barrels (or mmBtu) per lot or None}: the exchange's contract sizes, from MCX_CRUDEOIL_LOT_SIZE
+    (100 bbl), MCX_CRUDEOILM_LOT_SIZE (10 bbl) and, reserved for a future setup, MCX_NATURALGAS_LOT_SIZE and
+    MCX_NATURALGASM_LOT_SIZE. A crude value that is not the contract size MCX publishes is refused: the usual
+    cause is putting the NUMBER OF LOTS here (that goes in MCX_CRUDEOIL_LOTS / MCX_CRUDEOILM_LOTS)."""
+    sizes = {contract: _whole_number(name, "barrels") for contract, name in LOT_SIZE_SETTINGS.items()}
+    for contract, size in sizes.items():
+        expected = options.CONTRACT_BARRELS.get(contract)
+        if size is not None and expected is not None and size != expected:
+            raise InputError("Invalid setting", f"{LOT_SIZE_SETTINGS[contract]}={size}: MCX's {contract} lot is {expected} "
+                             f"barrels. To set how many lots you trade, use {LOT_COUNT_SETTINGS[contract]}.")
+    return sizes
+
+
+def load_lot_counts():
+    """{contract: lots or None}: how many lots you trade per signal, from MCX_CRUDEOIL_LOTS and
+    MCX_CRUDEOILM_LOTS. Whole numbers of at least 1."""
+    return {contract: _whole_number(name, "lots") for contract, name in LOT_COUNT_SETTINGS.items()}
 
 
 def sigma_method():
@@ -411,7 +427,7 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
                     "per_mb_usd": round(abs(usd) / abs(tls), 3), "sanity_ok": model.sanity_ok(tls, usd),
                     "anchor_low_usd": anchor[0], "anchor_high_usd": anchor[1],
                     "anchor_low_inr": int(round(anchor[0] * usd_inr)), "anchor_high_inr": int(round(anchor[1] * usd_inr)),
-                    "band": options.band_context(usd * usd_inr, market["wti"] * usd_inr) if market.get("wti") else None}
+                    "band": options.band_context(anchor[1] * usd_inr, market["wti"] * usd_inr) if market.get("wti") else None}
         checklist = REGIME_CHECK[regime] + ([TIME_SPREAD_CHECK] if regime == 1 and direction == "bullish" else [])             + ALWAYS_CHECK
         if option["expiry_source"] != "mcx_calendar":
             checklist.insert(0, f"The expiry date {option['expiry_date']} is a GUESS (that month is not in the MCX "
@@ -462,10 +478,10 @@ def main(argv=None):
         market = load_market(allow_stale=args.allow_stale)
         method = sigma_method()
         sigma, weeks = load_sigma(inputs["release_date"], method=method)
-        settings = load_lot_sizes()
-        lots = {contract: n for contract, n in settings.items() if n and contract in options.CONTRACT_BARRELS}
+        load_lot_sizes()   # refuses a lot size that is not MCX's (the usual mistake: a lot COUNT in a SIZE setting)
+        lots = {contract: n for contract, n in load_lot_counts().items() if n}
         if not lots:
-            logger.warning("MCX_CRUDEOIL_LOT_SIZE / MCX_CRUDEOILM_LOT_SIZE not set - no lot count in the signal")
+            logger.warning("MCX_CRUDEOIL_LOTS / MCX_CRUDEOILM_LOTS not set - no lot count in the signal")
         usd_inr, source = fetch_usd_inr()
         signal = build_signal(inputs, market, sigma, usd_inr, source, lots=lots or None, sigma_method=method)
         write_json(SIGNAL_FILE, signal)
