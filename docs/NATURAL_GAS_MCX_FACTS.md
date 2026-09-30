@@ -108,3 +108,38 @@ The structure fits (single-variable print, storage vs the 5-year average, weathe
 - Whether weekly options exist for natural gas.
 - Confirm the mini symbol as listed for options (`NATGASMINI`) against the broker's instrument master.
 - MCX's definition of a business day on morning-only holidays (same open question as crude).
+
+## 5. Feasibility check (2026-09-30)
+
+Read-only checks against the live sources. No pipeline code changed.
+
+| Input | Result |
+|---|---|
+| **tradingeconomics** `united-states/natural-gas-stocks-change` | Loads. Shows 3 rows (previous, latest, next) with actual, previous and consensus. Values carry a `Bcf` suffix (`53Bcf`), which `calendar.to_mb_suffixed` does not parse, so today the rows come back with `actual`/`consensus` = `None`. The stats table works (53.0). The `united-states/natural-gas-stocks` slug does not exist. |
+| **investing.com** `natural-gas-storage-386` | Loads. About 10 weekly rows with actual, forecast (= consensus) and previous. Values carry a `B` suffix (`53.00B`), also unparsed today. |
+| **EIA storage table** `https://ir.eia.gov/ngs/wngsr.csv` | Public, no key. Needs `follow_redirects=True` (302 to a signed URL). Gives total stocks (3,351 Bcf), net change (+53), the year-ago figure and the **5-year average (3,256 Bcf, stocks 2.9% above it)**, so the deficit/glut context can be computed. The `ngs.csv` variant is 403. |
+| **Yahoo `NG=F`** | 5-minute bars for the last 60 days (all of the last 8 prints), enough to measure post-print moves. |
+
+**Consensus panels differ.** For the 24-09 release investing.com's consensus was 50 Bcf and tradingeconomics' was 53 (equal to the actual), so the surprise is +3 or 0 depending on the source. Crude showed the same effect (-0.6 vs -0.7). Backfilled history (investing.com) and live values (TE) would mix panels, as for crude.
+
+**Surprise size.** Over the 8 investing.com weeks: standard deviation of actual minus consensus 3.8 Bcf, mean absolute 3.3 Bcf. At the 1.25 gate a trade needs about 4.6 Bcf, roughly one week in four.
+
+**Anchor test (NG=F, 5-minute bars, the 8 prints from 6 Aug to 24 Sep):**
+
+| Release | Surprise (Bcf) | 5 min | 30 min | 60 min |
+|---|---|---|---|---|
+| 06-08 | +3 | -0.016 | -0.024 | -0.001 |
+| 13-08 | +5 | -0.016 | -0.004 | +0.002 |
+| 20-08 | +1 | -0.008 | -0.026 | -0.025 |
+| 27-08 | -4 | **-0.038** | -0.044 | -0.052 |
+| 03-09 | 0 | -0.003 | -0.066 | -0.095 |
+| 10-09 | +5 | **+0.003** | +0.007 | +0.020 |
+| 17-09 | -5 | **-0.018** | -0.019 | -0.022 |
+| 24-09 | +3 | -0.006 | +0.089 | +0.148 |
+
+- A bullish surprise (negative) should lift the price. The move went the **expected way in 4 of the 7 non-zero prints and the wrong way in 3**, and the three wrong ones are the large ones (27-08, 10-09, 17-09).
+- The fitted slope is **-0.0009 USD per Bcf at 5 minutes** (correlation -0.61, wrong sign), against the blueprint's +0.003 to +0.005. n = 8, so this proves nothing either way, but **it gives no support to the anchor**.
+- The first-5-minute moves are small in absolute terms (0.003 to 0.038 USD, or Rs 0.3 to 3.6 a MMBtu); the 60-minute ranges are 0.04 to 0.18. Weather forecasts, not the storage number, seem to be doing the work.
+- Caveats: 8 prints, one season (summer injections), investing.com's consensus panel, a continuous front-month series (27-08 is a contract-roll day).
+
+**Read-out.** The inputs exist and are free (steps 1 and 2 of the plan are feasible: two consensus sources, the EIA level and 5-year average, price bars). The **edge is not demonstrated**: in the only measurable sample the surprise did not predict the first-5-minute direction. Do not build the model (steps 3-8) until a larger sample, or Gemini answers to questions 1, 5 and 6, say otherwise. Cheap next checks: keep logging each Thursday's print and price path (the journal does this for crude) so the sample grows by one a week; the 60-day bar window means the earliest of these 8 drops out in early October.
