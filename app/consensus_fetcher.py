@@ -1,159 +1,124 @@
-"""Fetch the Reuters/Bloomberg analyst consensus for this week's EIA report.
+"""Fetch the analyst consensus for the upcoming EIA report -> data/consensus.json.
 
-Runs Tuesday 19:00 IST. Source order:
-  1. CLI flags (--crude/--gasoline/--distillate/--previous) — always wins
-  2. tradingeconomics_scraper.fetch_consensus()  (plain HTTP, tried first)
-  3. investing_scraper.fetch_consensus()         (headless browser fallback)
-  4. interactive prompt (unless --no-prompt)
+Both sites are scraped at the same time, one thread and browser each, and every
+indicator (crude, gasoline, distillate) is won independently: the first site to
+return a valid value for it wins, and the output records which site that was.
+A site that can't deliver an indicator (blocked, page changed, consensus not
+posted yet) simply loses that race; the other site still gets its turn. All
+winners must be for the same release date. If any indicator ends with no valid
+value this fails loudly - the consensus is the baseline of every deviation, so
+a wrong or partial number is worse than none.
 
-The consensus is the denominator of every signal, so a wrong or stale number is
-worse than no number: this script fails loudly rather than guessing.
+Run from the repo root:
+    python -m app.consensus_fetcher                      # next unreleased EIA report
+    python -m app.consensus_fetcher --date 23-09-2026    # a specific release date
+    python -m app.consensus_fetcher --sites tradingeconomics
 """
-
-from __future__ import annotations
-
 import argparse
 import logging
-import sys
-from inspect import signature
+import os
 
 from dotenv import load_dotenv
 
-from common import DATA_DIR, now_utc, setup_logging, week_ending, write_json
-from petrocore_client import PetroCoreClient
-from telegram_bot import send_error
+from app.utils.common import CONSENSUS_FILE, ROOT, now_ist, setup_logging, write_json
+from app.utils.racer import race
+from app.utils.telegram import send_exception
+from app.scraper.sources import SOURCE_NAMES, scraper_for, slug_for
+from app.scraper.utils.calendar import pending_row, row_for_release
 
-load_dotenv()
+logger = logging.getLogger("twpr.consensus_fetcher")
 
-logger = logging.getLogger(__name__)
-
-CONSENSUS_FILE = DATA_DIR / "consensus.json"
-
-FIELDS = {
-    "crude_consensus_mb": "Crude oil consensus (mb, negative = draw)",
-    "gasoline_consensus_mb": "Gasoline consensus (mb)",
-    "distillate_consensus_mb": "Distillate consensus (mb)",
-    "crude_previous_mb": "Previous week's actual crude change (mb)",
-}
+SITES = ("tradingeconomics", "investing")
+INDICATORS = ("crude", "gasoline", "distillate")  # crude first: it carries crude_previous_mb
+RACE_TIMEOUT_S = 480  # investing.com needs one paced browser session per indicator
+FETCHED_AT_FORMAT = "%d-%m-%Y %H:%M"  # IST
 
 
-def _from_scraper(module_name: str, week: str) -> tuple[dict, str] | None:
-    """Try `module_name.fetch_consensus(week)`. Returns None when absent or failing."""
-    try:
-        module = __import__(module_name)
-    except ImportError:
-        logger.info("%s.py not present — skipping", module_name)
-        return None
+def fetch_candidate(site, name, release_date, stop, make_scraper):
+    """One site's answer for one indicator: {release_date, consensus, previous}, or raise."""
+    slug = slug_for(f"eia_{name}", site)
+    if slug is None:
+        raise LookupError(f"{site} has no slug for eia_{name}")
+    if stop.is_set():
+        raise InterruptedError("race over")
+    with make_scraper(site) as scraper:
+        page = scraper.fetch_page(slug)
+    if page is None:
+        raise RuntimeError(f"page fetch failed ({slug})")
 
-    fetcher = getattr(module, "fetch_consensus", None)
-    if fetcher is None:
-        logger.warning("%s.py has no fetch_consensus() — skipping", module_name)
-        return None
-
-    try:
-        # Pass the week when the scraper accepts one, so it never fetches a
-        # different week than the payload is about to be labelled with.
-        data = fetcher(week) if signature(fetcher).parameters else fetcher()
-    except Exception as exc:  # noqa: BLE001 — a broken scraper must not kill the run
-        logger.error("%s.fetch_consensus() failed: %s", module_name, exc)
-        return None
-
-    if not data:
-        logger.info("%s: no consensus available for %s", module_name, week)
-        return None
-
-    missing = [f for f in FIELDS if f not in data]
-    if missing:
-        logger.error("%s.fetch_consensus() omitted %s — discarding", module_name, missing)
-        return None
-
-    return {f: float(data[f]) for f in FIELDS}, module_name.replace("_scraper", ".com")
+    rows = page["calendar_rows"] or []
+    row = row_for_release(rows, release_date) if release_date else pending_row(rows)
+    if row is None:
+        raise RuntimeError(f"no row for release {release_date or '(next unreleased)'}")
+    if row["consensus"] is None:
+        raise ValueError(f"consensus for {row['release_date']} not posted yet")
+    if name == "crude" and row["previous"] is None:
+        raise ValueError(f"crude previous missing for {row['release_date']}")
+    return {"release_date": row["release_date"], "consensus": row["consensus"], "previous": row["previous"]}
 
 
-def _from_prompt() -> tuple[dict, str]:
-    """Ask for the four numbers on the terminal."""
-    print("\nEnter this week's consensus (from Reuters/Bloomberg survey):")
-    values = {}
-    for field, label in FIELDS.items():
-        while True:
-            raw = input(f"  {label}: ").strip()
+def _job(release_date, make_scraper):
+    """A site's job: walk the indicators, reporting each as it lands."""
+    def run(site, stop, ok, fail):
+        gap = getattr(make_scraper(site), "session_gap_s", 0)
+        for i, name in enumerate(INDICATORS):
+            if i and stop.wait(gap):  # paced sessions; wakes early if the race ended
+                return
             try:
-                values[field] = float(raw)
-                break
-            except ValueError:
-                print("    Not a number — try again (e.g. -1.6)")
-    return values, "manual"
+                ok(name, fetch_candidate(site, name, release_date, stop, make_scraper))
+            except Exception as exc:  # noqa: BLE001 - one indicator failing must not sink the site
+                fail(name, exc)
+    return run
 
 
-def fetch_consensus(args: argparse.Namespace, week: str) -> tuple[dict, str]:
-    """Resolve the consensus from CLI flags, a scraper, or the terminal."""
-    if args.crude is not None:
-        if None in (args.gasoline, args.distillate, args.previous):
-            raise ValueError("--crude requires --gasoline, --distillate and --previous too")
-        return (
-            {
-                "crude_consensus_mb": args.crude,
-                "gasoline_consensus_mb": args.gasoline,
-                "distillate_consensus_mb": args.distillate,
-                "crude_previous_mb": args.previous,
-            },
-            "manual",
-        )
-
-    for module_name in ("tradingeconomics_scraper", "investing_scraper"):
-        result = _from_scraper(module_name, week)
-        if result is not None:
-            return result
-
-    if args.no_prompt:
-        raise RuntimeError(
-            "No consensus source available: pass --crude/--gasoline/--distillate/--previous, "
-            "or check why tradingeconomics_scraper/investing_scraper returned no fetch_consensus()"
-        )
-
-    return _from_prompt()
+def _payload(decided):
+    crude = decided["crude"][1]
+    out = {
+        "release_date": crude["release_date"],
+        "crude_consensus_mb": crude["consensus"],
+        "gasoline_consensus_mb": decided["gasoline"][1]["consensus"],
+        "distillate_consensus_mb": decided["distillate"][1]["consensus"],
+        "crude_previous_mb": crude["previous"],
+    }
+    for name in INDICATORS:
+        out[f"{name}_source"] = SOURCE_NAMES[decided[name][0]]
+    return out
 
 
-def main() -> int:
-    """Resolve the consensus, save it, and publish it to PetroCore."""
+def fetch_consensus(release_date=None, sites=SITES, make_scraper=scraper_for, timeout_s=RACE_TIMEOUT_S):
+    """Race `sites` per indicator; return the payload (without fetched_at)."""
+    decided = race(sites, INDICATORS, _job(release_date, make_scraper), release_date, timeout_s, what="consensus")
+    result = _payload(decided)
+    logger.info("sources: %s", {n: result[f"{n}_source"] for n in INDICATORS})
+    return result
+
+
+def main(argv=None):
     setup_logging()
-    parser = argparse.ArgumentParser(description="TWPR consensus fetcher")
-    parser.add_argument("--crude", type=float, help="crude consensus in mb (negative = draw)")
-    parser.add_argument("--gasoline", type=float, help="gasoline consensus in mb")
-    parser.add_argument("--distillate", type=float, help="distillate consensus in mb")
-    parser.add_argument("--previous", type=float, help="previous week's actual crude change in mb")
-    parser.add_argument(
-        "--no-prompt", action="store_true", help="fail instead of prompting (for CI)"
-    )
-    parser.add_argument("--week", help="week ending (YYYY-MM-DD); defaults to the Friday the report covers")
-    args = parser.parse_args()
-
+    load_dotenv(ROOT / ".env")   # Telegram credentials for the failure alert
+    parser = argparse.ArgumentParser(description="Fetch the EIA consensus (first valid source per indicator wins)")
+    parser.add_argument("--date", help="EIA release date, DD-MM-YYYY (default: the next unreleased report)")
+    parser.add_argument("--sites", nargs="+", choices=SITES, default=list(SITES))
+    args = parser.parse_args(argv)
     try:
-        week = args.week or week_ending()
-        values, source = fetch_consensus(args, week)
-        payload = {
-            "week_ending": week,
-            **values,
-            "source": source,
-            "fetched_at": now_utc().isoformat(),
-        }
+        payload = {**fetch_consensus(args.date, tuple(args.sites)),
+                   "fetched_at": now_ist().strftime(FETCHED_AT_FORMAT)}
         write_json(CONSENSUS_FILE, payload)
         logger.info(
-            "Consensus %s (%s): crude %+.3f | gasoline %+.3f | distillate %+.3f",
-            payload["week_ending"],
-            source,
-            payload["crude_consensus_mb"],
-            payload["gasoline_consensus_mb"],
-            payload["distillate_consensus_mb"],
+            "consensus for %s: crude %+.3f | gasoline %+.3f | distillate %+.3f | crude previous %+.3f",
+            payload["release_date"], payload["crude_consensus_mb"], payload["gasoline_consensus_mb"],
+            payload["distillate_consensus_mb"], payload["crude_previous_mb"],
         )
-
-        PetroCoreClient().post_consensus(payload)
         return 0
-    except Exception as exc:  # noqa: BLE001 — top-level guard
-        logger.exception("consensus_fetcher.py failed")
-        send_error("consensus_fetcher.py", exc)
+    except Exception as exc:  # noqa: BLE001 - top-level guard
+        logger.exception("consensus_fetcher failed")
+        send_exception("consensus_fetcher.py", exc)
         return 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    logging.shutdown()
+    # The losing site's daemon thread may still be inside a browser call; exit
+    # hard so an abandoned Playwright thread can't hang or crash interpreter shutdown.
+    os._exit(code)

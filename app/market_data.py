@@ -1,276 +1,233 @@
-"""Fetch daily market data from yfinance and publish it.
+"""Market inputs for the WPSR model -> data/market.json (yfinance, no scraping).
 
-Runs 09:00 IST on weekdays. Pulls the last 5 trading days so a missed day is
-backfilled on the next run.
+    atr_20        20-day average true range of WTI front month, USD/bbl  (beta_vol input)
+    ovx           Cboe crude oil volatility index                        (beta_vol + strike delta)
+    cl1_cl2       front minus second WTI contract, USD/bbl               (scorecard, time-spread filter)
+    crack_321     3:2:1 crack spread, USD/bbl                            (scorecard)
+    overnight_rally_usd  WTI move from the API print (Tue 16:30 ET) to the EIA print   (Regime 3)
+    usd_inr_trend_pct    USD/INR change over the last 5 sessions                        (rupee context)
+    brent_wti     Brent minus WTI, USD/bbl                               (scorecard)
+    dxy           US dollar index                                        (context)
 
-The WTI M1-M2 spread comes from the two nearest dated NYMEX contracts rather than
-the EIA API: EIA's RCLC1/RCLC2 futures series exist but stopped publishing on
-2024-04-05, so any start date after that returns zero rows. Dated contracts also
-give the real curve instead of a continuous splice.
+atr_20 and ovx are required: without them the model cannot size the expected move,
+so the run fails loudly (Telegram alert, exit 1, nothing written). The scorecard
+values are context; any that cannot be read become null.
+
+Run from the repo root:
+    python -m app.market_data                      # now (run shortly before the print)
+    python -m app.market_data --date 23-09-2026    # replay: as of 10:29 ET on that release day
 """
-
-from __future__ import annotations
-
 import argparse
 import logging
 import sys
-from datetime import date
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-import pandas as pd
-import yfinance as yf
 from dotenv import load_dotenv
 
-from common import DATA_DIR, now_utc, setup_logging, write_json
-from currency import classify, trend_pct
-from expiry import refresh_cache
-from petrocore_client import PetroCoreClient
-from telegram_bot import send_error
+from app import currency
+from app.utils.common import DATE_FORMAT, MARKET_FILE, ROOT, fmt, fmt_ts, now_ist, now_utc, setup_logging, write_json
+from app.utils.telegram import send_exception
 
-load_dotenv()
+logger = logging.getLogger("twpr.market_data")
 
-logger = logging.getLogger(__name__)
-
-MARKET_DATA_FILE = DATA_DIR / "market_data.json"
-
-TICKERS = {
-    "CL=F": "wti_close",  # WTI front month
-    "BZ=F": "brent_close",  # Brent crude
-    "DX-Y.NYB": "dxy_close",  # US Dollar Index
-    "INR=X": "usd_inr_close",  # USD/INR spot
-    "RB=F": "rbob_close",  # RBOB gasoline, $/gallon
-    "HO=F": "heating_oil_close",  # Heating oil, $/gallon
-}
-
-# NYMEX delivery-month codes, Jan..Dec. CL contracts are monthly.
-MONTH_CODES = "FGHJKMNQUVXZ"
-CONTRACT_TEMPLATE = "CL{code}{year:02d}.NYM"
-# How many months ahead to offer as candidates. Expired contracts 404 and drop
-# out, so this only has to be wide enough to cover the two live front months.
-CONTRACT_CANDIDATES = 8
-
-GALLONS_PER_BARREL = 42
-LOOKBACK_DAYS = 5
-REQUEST_TIMEOUT_SECONDS = 30.0
+ATR_DAYS = 20
+FETCH_TIMEOUT_S = 15
+MONTH_CODES = "FGHJKMNQUVXZ"   # CME futures month codes, Jan..Dec
+FRONT_TOLERANCE = 0.25         # USD; a live quote can move between two fetches
+BARRELS_PER_GALLON = 42       # RBOB and heating oil are quoted in USD/gallon
+NEW_YORK = ZoneInfo("America/New_York")
+API_TIME_ET = (16, 30)         # API report, Tuesday
+PRINT_ET = (10, 30)            # EIA report, the next morning
+MAX_BAR_GAP = timedelta(minutes=45)   # older than this and there is no price "at" the moment
 
 
-def fetch_yfinance(lookback_days: int = LOOKBACK_DAYS) -> pd.DataFrame:
-    """Daily closes for every ticker, indexed by date string. Newest last."""
-    # Ask for extra calendar days so weekends/holidays still yield 5 sessions.
-    raw = yf.download(
-        list(TICKERS),
-        period=f"{lookback_days * 3}d",
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-    )
-    if raw.empty:
-        raise RuntimeError("yfinance returned no rows")
-
-    closes = raw["Close"].rename(columns=TICKERS)
-    # Forward-fill: FX trades on days the futures pits are shut, and vice versa.
-    closes = closes.ffill().dropna(how="all").tail(lookback_days)
-    closes.index = [d.date().isoformat() for d in closes.index]
-    return closes
+def true_ranges(bars):
+    """True range per bar after the first: max(high-low, |high-prev close|, |low-prev close|).
+    `bars` is a list of (high, low, close), oldest first."""
+    return [max(h - l, abs(h - pc), abs(l - pc)) for (h, l, _), (_, _, pc) in zip(bars[1:], bars)]
 
 
-def contract_tickers(as_of: date, count: int = CONTRACT_CANDIDATES) -> list[str]:
-    """Candidate NYMEX WTI contract tickers from `as_of`'s month forward."""
-    tickers = []
-    year, month = as_of.year, as_of.month
-    for _ in range(count):
-        tickers.append(
-            CONTRACT_TEMPLATE.format(code=MONTH_CODES[month - 1], year=year % 100)
-        )
-        month += 1
-        if month > 12:
-            month, year = 1, year + 1
-    return tickers
+def atr(bars, days=ATR_DAYS):
+    """Simple average of the last `days` true ranges. ValueError if there are too few bars.
+    (Simple mean, not Wilder smoothing: the runbook only says "20-day ATR".)"""
+    ranges = true_ranges(bars)
+    if len(ranges) < days:
+        raise ValueError(f"need {days + 1} daily bars for a {days}-day ATR, got {len(bars)}")
+    return sum(ranges[-days:]) / days
 
 
-def fetch_front_contracts(lookback_days: int = LOOKBACK_DAYS, as_of: date | None = None) -> pd.DataFrame:
-    """Closes for the two nearest live WTI contracts, as wti_m1_price / wti_m2_price.
-
-    Contracts that have already expired return nothing from yfinance, so the live
-    ones identify themselves: order the candidates by delivery month and take the
-    first two that actually have data.
-    """
-    candidates = contract_tickers(as_of or now_utc().date())
-
-    # Expired contracts 404, which is how the live ones identify themselves — so
-    # yfinance's ERROR lines for them are the mechanism working, not a fault.
-    # Quieten it for this call only; real yfinance problems elsewhere still show.
-    yf_logger = logging.getLogger("yfinance")
-    previous_level = yf_logger.level
-    yf_logger.setLevel(logging.CRITICAL)
-    try:
-        raw = yf.download(
-            candidates,
-            period=f"{lookback_days * 3}d",
-            interval="1d",
-            auto_adjust=False,
-            progress=False,
-        )
-    finally:
-        yf_logger.setLevel(previous_level)
-    if raw.empty:
-        logger.warning("No WTI contract data returned — M1/M2 will be null")
-        return pd.DataFrame()
-
-    closes = raw["Close"] if "Close" in raw else pd.DataFrame()
-    # Keep candidate order (nearest delivery first), drop contracts with no data.
-    live = [t for t in candidates if t in closes.columns and closes[t].notna().any()]
-    if len(live) < 2:
-        logger.warning("Fewer than two live WTI contracts (%s) — M1/M2 will be null", live)
-        return pd.DataFrame()
-
-    m1, m2 = live[0], live[1]
-    logger.info("WTI front contracts: M1 %s, M2 %s", m1, m2)
-
-    frame = closes[[m1, m2]].rename(columns={m1: "wti_m1_price", m2: "wti_m2_price"})
-    frame = frame.dropna(how="all")
-    frame.index = [d.date().isoformat() for d in frame.index]
-    return frame
+def crack_321(wti, rbob, heating_oil):
+    """3:2:1 crack: (2 gasoline + 1 distillate - 3 crude) / 3, products converted to USD/bbl."""
+    return (2 * rbob * BARRELS_PER_GALLON + heating_oil * BARRELS_PER_GALLON - 3 * wti) / 3
 
 
-def _check_front_month(closes: pd.DataFrame) -> None:
-    """Warn when M1 and the continuous front month disagree.
-
-    `CL=F` is the front-month continuous, so it should equal the nearest dated
-    contract. A gap means the contract roll was misread and the spread would be
-    measured off the wrong pair.
-    """
-    if "wti_close" not in closes or "wti_m1_price" not in closes:
-        return
-    latest = closes.dropna(subset=["wti_close", "wti_m1_price"]).tail(1)
-    if latest.empty:
-        return
-
-    spot = float(latest["wti_close"].iloc[0])
-    m1 = float(latest["wti_m1_price"].iloc[0])
-    if spot and abs(m1 - spot) / spot > 0.01:
-        logger.warning(
-            "M1 %.2f is more than 1%% from the continuous front month %.2f — "
-            "check the contract roll before trusting wti_m1m2_spread",
-            m1, spot,
-        )
+def contract_symbols(today, count=4):
+    """The next `count` WTI contract tickers after `today`'s month, e.g. CLX26.NYM."""
+    index = today.year * 12 + today.month - 1     # months since year 0, zero-based
+    symbols = []
+    for step in range(1, count + 1):
+        year, month = divmod(index + step, 12)
+        symbols.append(f"CL{MONTH_CODES[month]}{year % 100:02d}.NYM")
+    return symbols
 
 
-def calculate_derived(row: dict) -> dict:
-    """Add spreads, the 3-2-1 crack, and the approximate MCX close to one day's row."""
-    wti = row.get("wti_close")
-    m1, m2 = row.get("wti_m1_price"), row.get("wti_m2_price")
+def front_second(front_close, closes_by_symbol):
+    """(front, second) contract closes. `closes_by_symbol` maps the ordered contract tickers to
+    their last close; the front is the one trading at CL=F's price (within FRONT_TOLERANCE,
+    since the quotes are fetched a moment apart), the second is the ticker after it. Both
+    come from the contract quotes so the spread is internally consistent. None if the
+    front can't be identified (never guess the spread)."""
+    symbols = list(closes_by_symbol)
+    for i, symbol in enumerate(symbols[:-1]):
+        close = closes_by_symbol[symbol]
+        if close is not None and abs(close - front_close) <= FRONT_TOLERANCE:
+            second = closes_by_symbol[symbols[i + 1]]
+            return (close, second) if second is not None else None
+    return None
 
-    # Positive = backwardation (tight market); negative = contango (oversupplied).
-    row["wti_m1m2_spread"] = round(m1 - m2, 3) if m1 is not None and m2 is not None else None
 
-    rbob, heating_oil = row.get("rbob_close"), row.get("heating_oil_close")
-    if None not in (rbob, heating_oil, wti):
-        row["crack_321"] = round(
-            (
-                2 * rbob * GALLONS_PER_BARREL
-                + 1 * heating_oil * GALLONS_PER_BARREL
-                - 3 * wti
-            )
-            / 3,
-            3,
-        )
+def last_api_time(now):
+    """The most recent Tuesday 16:30 New York time at or before `now` (an aware datetime)."""
+    local = now.astimezone(NEW_YORK)
+    tuesday = (local - timedelta(days=(local.weekday() - 1) % 7)).replace(
+        hour=API_TIME_ET[0], minute=API_TIME_ET[1], second=0, microsecond=0)
+    return tuesday if tuesday <= local else tuesday - timedelta(days=7)
+
+
+def price_at(bars, moment):
+    """Open of the last bar starting at or before `moment`, or None if that bar is more than
+    MAX_BAR_GAP old (a gap in the data is not a price). `bars` = [(aware start time, open)]."""
+    earlier = [(start, price) for start, price in bars if start <= moment]
+    if not earlier or moment - earlier[-1][0] > MAX_BAR_GAP:
+        return None
+    return earlier[-1][1]
+
+
+def overnight_rally(bars, now):
+    """WTI's move from the API print (Tuesday 16:30 ET) to just before the EIA print (10:30 ET the
+    next morning, or `now` if that is earlier), or None if either price is missing. Assumes the
+    usual Tuesday -> Wednesday pair: a holiday-shifted release is not modelled."""
+    api_time = last_api_time(now)
+    print_time = min(now.astimezone(NEW_YORK), (api_time + timedelta(days=1)).replace(
+        hour=PRINT_ET[0], minute=PRINT_ET[1]))
+    # the bar that opens AT the print already contains the reaction, so stop one second earlier
+    start, end = price_at(bars, api_time), price_at(bars, print_time - timedelta(seconds=1))
+    if start is None or end is None:
+        return None
+    return {"rally_usd": round(end - start, 2), "api_price": round(start, 2), "pre_print_price": round(end, 2)}
+
+
+def replay_moment(release_date):
+    """DD-MM-YYYY -> 10:29 New York time that day: one minute before the print, the moment a
+    live run should have happened."""
+    day = datetime.strptime(release_date, DATE_FORMAT)
+    return datetime(day.year, day.month, day.day, PRINT_ET[0], PRINT_ET[1] - 1, tzinfo=NEW_YORK)
+
+
+def intraday_bars(ticker, asof=None, interval="5m"):
+    """[(aware start time, open)] for a yfinance ticker, oldest first. With `asof` (a replay), the
+    days around it (Yahoo keeps 5-minute bars for about 60 days)."""
+    import yfinance as yf
+    if asof is None:
+        frame = yf.Ticker(ticker).history(period="5d", interval=interval, timeout=FETCH_TIMEOUT_S).dropna()
     else:
-        row["crack_321"] = None
-
-    brent = row.get("brent_close")
-    row["brent_wti_spread"] = round(brent - wti, 3) if None not in (brent, wti) else None
-
-    usd_inr = row.get("usd_inr_close")
-    # MCX CrudeOil is quoted in INR per barrel; this is the textbook approximation,
-    # not the exchange's own settlement. Replace once Angel One SmartAPI is wired up.
-    row["mcx_close"] = round(wti * usd_inr, 2) if None not in (wti, usd_inr) else None
-    row["mcx_source"] = "calculated"
-
-    # Every column now comes from yfinance: spot tickers plus the two nearest
-    # dated NYMEX contracts. EIA no longer contributes to this row.
-    row["source"] = "yfinance"
-    row["fetched_at"] = now_utc().isoformat()
-    return row
+        day = asof.date()
+        frame = yf.Ticker(ticker).history(start=day - timedelta(days=5), end=day + timedelta(days=1),
+                                          interval=interval, timeout=FETCH_TIMEOUT_S).dropna()
+    if frame.empty:
+        raise RuntimeError(f"no intraday data for {ticker}")
+    return [(ts.to_pydatetime(), float(row.Open)) for ts, row in zip(frame.index, frame.itertuples())]
 
 
-def build_rows(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
-    """Merge spot closes and the front two contracts, then derive the columns."""
-    closes = fetch_yfinance(lookback_days)
+def history(ticker, period="3mo", before=None, lookback_days=150):
+    """(bars, dates) for a yfinance ticker: (high, low, close) per day and the matching dates, oldest
+    first. With `before` (a date, for a replay) only days strictly before it."""
+    import yfinance as yf
+    if before is None:
+        frame = yf.Ticker(ticker).history(period=period, timeout=FETCH_TIMEOUT_S).dropna()
+    else:
+        frame = yf.Ticker(ticker).history(start=before - timedelta(days=lookback_days), end=before,
+                                          timeout=FETCH_TIMEOUT_S).dropna()
+    if frame.empty:
+        raise RuntimeError(f"no data for {ticker}")
+    return [(float(r.High), float(r.Low), float(r.Close)) for r in frame.itertuples()], [d.date() for d in frame.index]
 
+
+def last_close(ticker, before=None):
+    bars, dates = history(ticker, "5d", before, lookback_days=10)
+    return bars[-1][2], dates[-1]
+
+
+def optional(name, fn, quiet=False):
+    """fn() -> value, or None (logged) if it fails: a scorecard input never sinks the run.
+    `quiet` logs at debug level: for probes where a miss is normal (an expired contract)."""
     try:
-        contracts = fetch_front_contracts(lookback_days)
-        if not contracts.empty:
-            closes = closes.join(contracts, how="left")
-            # The spot columns are already forward-filled, so the newest row can be
-            # a weekend or holiday date the contracts have no print for. Fill them
-            # the same way: with the pits shut, the last known curve is the curve.
-            closes[["wti_m1_price", "wti_m2_price"]] = closes[
-                ["wti_m1_price", "wti_m2_price"]
-            ].ffill()
-            _check_front_month(closes)
-    except Exception as exc:  # noqa: BLE001 — the curve is a nice-to-have, not the row
-        logger.error("Front-contract fetch failed, continuing without M1/M2: %s", exc)
-
-    rows = []
-    for date_str, series in closes.iterrows():
-        row = {"date": date_str}
-        row.update({k: (None if pd.isna(v) else round(float(v), 4)) for k, v in series.items()})
-        rows.append(calculate_derived(row))
-    return rows
+        return fn()
+    except Exception as exc:  # noqa: BLE001 - any failure means "not available"
+        (logger.debug if quiet else logger.warning)("%s unavailable: %s", name, exc)
+        return None
 
 
-def main() -> int:
-    """Fetch, save and publish the latest market data rows."""
+def fetch_market(today=None, asof=None):
+    """The market inputs now, or - with `asof` (an aware datetime, see replay_moment) - as they stood
+    then: only days before that date, and the overnight rally up to that moment."""
+    if asof is not None:
+        today, before, now = asof.date(), asof.date(), asof
+    else:
+        today, before, now = today or now_ist().date(), None, now_utc()
+    bars, dates = history("CL=F", before=before)
+    wti, as_of = bars[-1][2], dates[-1]      # latest quote (live if the session is open)
+    if dates[-1] >= today:                   # today's bar is still forming: ATR uses completed days only
+        bars = bars[:-1]
+    market = {
+        "as_of": fmt(as_of),
+        "wti": round(wti, 2),
+        "atr_20": round(atr(bars), 3),
+        "ovx": round(last_close("^OVX", before)[0], 2),
+    }
+
+    def spread():
+        closes = {s: optional(s, lambda s=s: last_close(s, before)[0], quiet=True) for s in contract_symbols(today)}
+        pair = front_second(wti, closes)
+        if pair is None:
+            raise RuntimeError("could not identify the front contract")
+        return round(pair[0] - pair[1], 2)
+
+    market["cl1_cl2"] = optional("CL1-CL2", spread)
+    market["brent_wti"] = optional("Brent-WTI", lambda: round(last_close("BZ=F", before)[0] - wti, 2))
+    market["crack_321"] = optional("3:2:1 crack", lambda: round(crack_321(wti, last_close("RB=F", before)[0], last_close("HO=F", before)[0]), 2))
+    market["dxy"] = optional("DXY", lambda: round(last_close("DX-Y.NYB", before)[0], 2))
+
+    def inr_trend():   # USD/INR over the last 5 sessions (6 daily closes)
+        bars, _ = history("INR=X", before=before, lookback_days=20)
+        return currency.trend_pct([b[2] for b in bars][-6:])
+    market["usd_inr_trend_pct"] = optional("USD/INR trend", inr_trend)
+    move = optional("overnight rally", lambda: overnight_rally(intraday_bars("CL=F", asof), now))
+    market["overnight_rally_usd"] = move["rally_usd"] if move else None
+    market["overnight_api_price"] = move["api_price"] if move else None
+    market["overnight_pre_print_price"] = move["pre_print_price"] if move else None
+    market["fetched_at"] = fmt_ts(asof.astimezone(now_ist().tzinfo) if asof else now_ist())
+    return market
+
+
+def main(argv=None):
     setup_logging()
-    parser = argparse.ArgumentParser(description="TWPR daily market data fetcher")
-    parser.add_argument(
-        "--days", type=int, default=LOOKBACK_DAYS, help="trading days to fetch (default 5)"
-    )
-    args = parser.parse_args()
-
+    load_dotenv(ROOT / ".env")
+    parser = argparse.ArgumentParser(description="Market inputs for the WPSR model")
+    parser.add_argument("--date", type=replay_moment, help="replay a release, DD-MM-YYYY: the inputs as of 10:29 ET that day")
+    args = parser.parse_args(argv)
     try:
-        rows = build_rows(args.days)
-        if not rows:
-            raise RuntimeError("no market data rows produced")
-
-        latest = rows[-1]
-        # Only the latest row is saved, so carry the trends across the window with
-        # it — signal_engine reads this file for currency context and would
-        # otherwise have a single day and no sense of direction.
-        latest["usd_inr_trend_pct"] = trend_pct([r.get("usd_inr_close") for r in rows])
-        latest["wti_trend_pct"] = trend_pct([r.get("wti_close") for r in rows])
-        latest["trend_sessions"] = len(rows)
-
-        write_json(MARKET_DATA_FILE, latest)
-        logger.info(
-            "Market data %s: WTI %s | Brent %s | USDINR %s | MCX~%s | crack321 %s",
-            latest["date"],
-            latest.get("wti_close"),
-            latest.get("brent_close"),
-            latest.get("usd_inr_close"),
-            latest.get("mcx_close"),
-            latest.get("crack_321"),
-        )
-        logger.info(
-            "Trends over %d sessions: WTI %+.2f%% | USDINR %+.2f%% (%s)",
-            latest["trend_sessions"],
-            latest["wti_trend_pct"] or 0.0,
-            latest["usd_inr_trend_pct"] or 0.0,
-            classify(latest["usd_inr_trend_pct"]),
-        )
-
-        # Keep the option expiry calendar warm here, on the 09:00 run, so the
-        # Wednesday signal path reads a file instead of the network.
-        refresh_cache()
-
-        client = PetroCoreClient()
-        for row in rows:
-            client.post_market_data(row)
-        return 0
-    except Exception as exc:  # noqa: BLE001 — top-level guard
-        logger.exception("market_data.py failed")
-        send_error("market_data.py", exc)
+        market = fetch_market(asof=args.date)
+        write_json(MARKET_FILE, market)
+    except Exception as exc:  # noqa: BLE001 - alert instead of failing silently
+        logger.error("market data failed: %s", exc)
+        send_exception("market_data.py", exc)
         return 1
+    logger.info("market %s: WTI %.2f | ATR20 %.3f | OVX %.2f | CL1-CL2 %s | crack %s | Brent-WTI %s | DXY %s | overnight rally %s",
+                market["as_of"], market["wti"], market["atr_20"], market["ovx"], market["cl1_cl2"],
+                market["crack_321"], market["brent_wti"], market["dxy"], market.get("overnight_rally_usd"))
+    return 0
 
 
 if __name__ == "__main__":

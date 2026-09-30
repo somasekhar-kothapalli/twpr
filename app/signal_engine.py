@@ -1,390 +1,503 @@
-"""TWPR signal engine — the 5-step deterministic rule engine.
+"""The TWPR signal engine: the WPSR runbook model -> data/signal.json.
 
-The rules below are the source of truth. The AI layer (Groq / Ollama) only
-writes the narrative fields (key_drivers, risks, reasoning). It never touches
-grade, direction, confidence, or the trade recommendation.
+Reads data/consensus.json + api_report.json + eia_actuals.json + market.json +
+surprise_history.json. No scraping. Runs right after eia_actuals.py (Wednesday, ~2 min
+after the print). Telegram is used for ERRORS only here; telegram_bot.py sends the signal.
+
+The model (docs/WPSR_WEDNESDAY_RUNBOOK.md section 3 and the MCX options adaptation):
+TLS -> Z-score gate (|Z| >= 1.25) -> Cushing check (contradiction routes to Regime 2)
+-> regime -> expected move -> ITM option, expiry gate and the INR risk of your lot count.
+The maths is in app/model.py and app/options.py (pure); this file loads, validates and
+assembles. The Groq narrative only writes prose: it can never touch the trade, and if it
+fails the signal still ships with analysis "".
+
+Chart-side steps cannot be computed from data and are listed in signal["checklist"]:
+the time-spread and gamma filters, the entry retest, the real stop distance, FX/circuit
+aborts. The lot table is therefore given per futures stop, not as one number.
+
+Run from the repo root:
+    python -m app.signal_engine                  # today's data
+    python -m app.signal_engine --allow-stale    # replay data older than 2 days
 """
-
-from __future__ import annotations
-
+import argparse
 import json
 import logging
-import os
+import re
 import sys
-from dataclasses import asdict, dataclass, field
+import threading
 
 import httpx
+
 from dotenv import load_dotenv
 
-import currency
-from expiry import days_to_expiry, describe, is_tradeable
-from common import DATA_DIR, env, now_utc, read_json, setup_logging, week_ending, write_json
-from petrocore_client import PetroCoreClient
-from telegram_bot import send_error
+from app import currency, model, options
+from app.surprise_history import load_history, record_week
+from app.utils.common import (API_REPORT_FILE, CONSENSUS_FILE, DATA_DIR, EIA_ACTUALS_FILE, MARKET_FILE,
+                              ROOT, SIGNAL_FILE, SURPRISE_HISTORY_FILE, env, fmt_ts, is_stale, now_ist,
+                              parse_release_date, setup_logging, write_json)
+from app.utils.telegram import send_error
 
-load_dotenv()
+logger = logging.getLogger("twpr.signal_engine")
 
-logger = logging.getLogger(__name__)
+STALE_DAYS = 2             # consensus / EIA / market data older than this is refused
+API_MAX_LEAD_DAYS = 3      # the API report is released 1-2 days BEFORE the EIA report
+FREECURRENCY_URL = "https://api.freecurrencyapi.com/v1/latest"
+USD_INR_PLAUSIBLE = (50.0, 150.0)  # a quote outside this is bad data, not a rate
+USD_INR_TIMEOUT_S = 10
+GROQ_TIMEOUT_S = 15.0
+ANALYSIS_MAX_CHARS = 450   # 3 sentences / 70 words; replies run ~230-300 chars
+_SENTENCE_END = re.compile(r"[.!?](?=\s|$)")  # a "." inside "+3.569 mb" is not a sentence end
+GROQ_SYSTEM_PROMPT = (
+    "You are a crude oil options trading analyst.\n"
+    "Write exactly 3 sentences.\n"
+    "Sentence 1: What the total liquid surprise means for immediate WTI direction.\n"
+    "Sentence 2: The most important confirming or contradicting factor.\n"
+    "Sentence 3: One key risk to the signal.\n"
+    "Be direct. Use only the numbers given. No disclaimers. Max 70 words total."
+)
 
-CONSENSUS_FILE = DATA_DIR / "consensus.json"
-API_REPORT_FILE = DATA_DIR / "api_report.json"
-EIA_ACTUAL_FILE = DATA_DIR / "eia_actual.json"
-MARKET_DATA_FILE = DATA_DIR / "market_data.json"
-SIGNAL_FILE = DATA_DIR / "signal.json"
+SCORECARD_THRESHOLDS = {"backwardation_cl1_cl2": 0.30, "crack_321": 22.0, "brent_wti": 5.50}
 
-SKIP_THRESHOLD_MB = 1.0
-GRADE_A_THRESHOLD_MB = 1.5
-PRODUCTS_OPPOSE_THRESHOLD_MB = 2.0
-
-GRADE_A_BASE_CONFIDENCE = 75
-GRADE_B_BASE_CONFIDENCE = 55
-CONFIDENCE_STEP = 5
-
-
-@dataclass
-class Signal:
-    """A complete TWPR signal. `grade == 'skip'` means no trade this week."""
-
-    grade: str
-    direction: str
-    confidence: int
-    crude_deviation_mb: float = 0.0
-    gasoline_deviation_mb: float = 0.0
-    distillate_deviation_mb: float = 0.0
-    cushing_mb: float = 0.0
-    api_crude_mb: float = 0.0
-    cushing_confirms: bool = False
-    api_aligns: bool = False
-    products_strongly_oppose: bool = False
-    option_type: str | None = None
-    strike_type: str | None = None
-    size_pct: float | None = None
-    key_drivers: list[str] = field(default_factory=list)
-    risks: list[str] = field(default_factory=list)
-    reasoning: str = ""
-    model_used: str = "rule_based"
-    # Why a skip happened: "deviation" (inside the +/-1.0 zone) or "expiry"
-    # (the near-month option is too close to expiry to trade).
-    skip_reason: str | None = None
-
-
-def generate_signal(
-    crude_deviation_mb: float,
-    gasoline_deviation_mb: float,
-    distillate_deviation_mb: float,
-    cushing_mb: float,
-    api_crude_mb: float,
-) -> Signal:
-    """Run the 5-step rule engine. Same inputs always produce the same output."""
-    # Step 1 — grade and direction from the crude deviation.
-    if abs(crude_deviation_mb) <= SKIP_THRESHOLD_MB:
-        return Signal(
-            grade="skip",
-            direction="neutral",
-            confidence=0,
-            skip_reason="deviation",
-            crude_deviation_mb=crude_deviation_mb,
-            gasoline_deviation_mb=gasoline_deviation_mb,
-            distillate_deviation_mb=distillate_deviation_mb,
-            cushing_mb=cushing_mb,
-            api_crude_mb=api_crude_mb,
-        )
-
-    if crude_deviation_mb <= -GRADE_A_THRESHOLD_MB:
-        grade, direction = "A", "bullish"
-    elif crude_deviation_mb <= -SKIP_THRESHOLD_MB:
-        grade, direction = "B", "bullish"
-    elif crude_deviation_mb >= GRADE_A_THRESHOLD_MB:
-        grade, direction = "A", "bearish"
-    else:
-        grade, direction = "B", "bearish"
-
-    # Step 2 — Cushing adjustment. A downgrades to B; B never downgrades further.
-    cushing_contradicts = (direction == "bullish" and cushing_mb > 0) or (
-        direction == "bearish" and cushing_mb < 0
-    )
-    if cushing_contradicts and grade == "A":
-        grade = "B"
-
-    # Step 3 — products check. Noted as a risk; never changes the grade.
-    bearish_sign = 1 if direction == "bearish" else -1
-    products_strongly_oppose = (
-        abs(gasoline_deviation_mb) > PRODUCTS_OPPOSE_THRESHOLD_MB
-        and abs(distillate_deviation_mb) > PRODUCTS_OPPOSE_THRESHOLD_MB
-        and gasoline_deviation_mb * bearish_sign > 0
-        and distillate_deviation_mb * bearish_sign > 0
-    )
-
-    # Step 4 — API alignment.
-    api_aligns = (direction == "bullish" and api_crude_mb < 0) or (
-        direction == "bearish" and api_crude_mb > 0
-    )
-
-    # Step 5 — confidence, off the post-adjustment grade. Range 45-85.
-    confidence = GRADE_A_BASE_CONFIDENCE if grade == "A" else GRADE_B_BASE_CONFIDENCE
-    confidence += -CONFIDENCE_STEP if cushing_contradicts else CONFIDENCE_STEP
-    confidence += CONFIDENCE_STEP if api_aligns else -CONFIDENCE_STEP
-
-    option_type = "call" if direction == "bullish" else "put"
-    strike_type, size_pct = ("ATM", 2.0) if grade == "A" else ("1-OTM", 1.5)
-
-    return Signal(
-        grade=grade,
-        direction=direction,
-        confidence=confidence,
-        crude_deviation_mb=crude_deviation_mb,
-        gasoline_deviation_mb=gasoline_deviation_mb,
-        distillate_deviation_mb=distillate_deviation_mb,
-        cushing_mb=cushing_mb,
-        api_crude_mb=api_crude_mb,
-        cushing_confirms=not cushing_contradicts,
-        api_aligns=api_aligns,
-        products_strongly_oppose=products_strongly_oppose,
-        option_type=option_type,
-        strike_type=strike_type,
-        size_pct=size_pct,
-    )
+ALWAYS_CHECK = [
+    "Limit orders only on the option chain, never a market order. A missed fill is not a loss.",
+    "Fair value: MCX futures should sit near WTI x USD/INR (the futures level in the strike guide). If they are "
+    "far apart, or the rupee is gapping, do not trade: the price you would pay is not the WTI move the model measured.",
+    "Geopolitical tension elevated? Size down 50% (circuit-limit risk).",
+    "Price within $0.15 of a heavy-OI strike (weekly pinning)? Cut the expected move by 40%.",
+    "Stop: 1.5 x 1-min ATR or outside VWAP +/-1.5 sigma, whichever is wider (min $0.18-$0.35); "
+    "exit the OPTION when its own premium hits the delta-adjusted stop.",
+    "Scale out 50% on the first clean thrust, stop to break-even on the rest.",
+    "Check the option's bid/ask BEFORE the print. If the spread eats a large share of the expected move, "
+    "skip - a wide spread on a deep-ITM strike is a cost paid on entry and again on exit.",
+    "The lot table assumes the option loses delta x the futures stop. It ignores the IV crush after the "
+    "print (vega): size below the table until you have measured real fills.",
+]
+TIME_SPREAD_CHECK = ("Bullish only: a flat-price rally of $0.40 or more needs CL1-CL2 to widen $0.02-$0.04, "
+                     "otherwise reject the long.")
+REGIME_CHECK = {
+    1: ["Regime 1: enter on a limit retest of the broken pre-release boundary (P_high long / P_low short), "
+        "aligned CVD. No retest = no trade."],
+    2: ["Regime 2 (FADE, lower conviction): do NOT trade the initial spike. Wait for a stall at prior daily "
+        "high/low or Value Area, then a 1-min close back inside the pre-release range. "
+        "Targets: opposite side of the range, then session POC. Size down without a clean confirmation candle."],
+    3: ["Regime 3 (sell the fact): the overnight rally is confirmed (see calculations.overnight_rally_usd); "
+        "short only on a cross below the 09:00 ET cash-open VWAP."],
+}
 
 
-def apply_expiry_gate(signal: Signal, days: int | None) -> Signal:
-    """Force a skip when the near-month option is too close to expiry.
+# ------------------------------------------------------------------------ inputs
 
-    Deliberately separate from `generate_signal`, which stays a pure function of
-    the five inventory numbers. This is a tradeability gate on its output, not a
-    sixth rule: the inventory verdict is unchanged and still recorded, the trade
-    is simply not taken with an instrument the exits were not calibrated for.
+class InputError(Exception):
+    """An input problem that stops the run; `title` heads the Telegram alert."""
 
-    An unknown `days` does not gate — see `expiry.is_tradeable`.
-    """
-    if signal.grade == "skip" or is_tradeable(days):
-        return signal
-
-    logger.warning(
-        "Overriding Grade %s %s to skip: only %s day(s) to option expiry",
-        signal.grade, signal.direction, days,
-    )
-    # Keep the inventory read on the record; drop the trade recommendation.
-    signal.grade = "skip"
-    signal.direction = "neutral"
-    signal.confidence = 0
-    signal.skip_reason = "expiry"
-    signal.option_type = None
-    signal.strike_type = None
-    signal.size_pct = None
-    return signal
+    def __init__(self, title, detail):
+        super().__init__(f"{title}: {detail}")
+        self.title, self.detail = title, detail
 
 
-def rule_based_narrative(signal: Signal) -> tuple[list[str], list[str], str]:
-    """Deterministic drivers/risks/reasoning — the fallback when no AI is configured."""
-    if signal.grade == "skip":
-        if signal.skip_reason == "expiry":
-            return (
-                [
-                    f"Crude deviation {signal.crude_deviation_mb:+.3f} mb would have traded",
-                    "Near-month option is too close to expiry",
-                ],
-                ["Skipped on expiry, not on the data — the inventory signal was tradeable"],
-                "The inventory read was tradeable but the near-month option expires too "
-                "soon: a near-dead option has the wrong gamma and spread for a -40/+50 "
-                "exit structure. No trade.",
-            )
-        return (
-            [f"Crude deviation {signal.crude_deviation_mb:+.3f} mb is inside the skip zone"],
-            [],
-            "Crude came in within 1.0 mb of consensus. No directional edge — no trade.",
-        )
-
-    surprise = "larger draw" if signal.direction == "bullish" else "larger build"
-    drivers = [
-        f"EIA crude {surprise} than consensus by {abs(signal.crude_deviation_mb):.3f} mb",
-        f"Cushing {signal.cushing_mb:+.3f} mb "
-        f"{'confirms' if signal.cushing_confirms else 'contradicts'} the direction",
-        f"API crude {signal.api_crude_mb:+.3f} mb "
-        f"{'aligns with' if signal.api_aligns else 'contradicts'} the direction",
-    ]
-
-    risks = []
-    if not signal.cushing_confirms:
-        risks.append("Cushing moved against the headline crude number")
-    if not signal.api_aligns:
-        risks.append("API private report pointed the other way")
-    if signal.products_strongly_oppose:
-        risks.append(
-            f"Products moved strongly the same way (gasoline {signal.gasoline_deviation_mb:+.3f} mb,"
-            f" distillate {signal.distillate_deviation_mb:+.3f} mb)"
-        )
-    if signal.grade == "B":
-        risks.append("Grade B — reduced size, expect a lower hit rate")
-    risks.append("Options buyer: theta and IV crush after the release both work against you")
-
-    reasoning = (
-        f"Crude deviation of {signal.crude_deviation_mb:+.3f} mb gives a Grade {signal.grade} "
-        f"{signal.direction} signal at {signal.confidence} confidence. "
-        f"Trade: buy {signal.strike_type} {signal.option_type}, {signal.size_pct}% of capital. "
-        "Hard close 22:30 IST regardless of P&L."
-    )
-    return drivers, risks, reasoning
-
-
-def _ai_narrative(signal: Signal, mode: str) -> tuple[list[str], list[str], str] | None:
-    """Ask Groq/Ollama to write the narrative. Returns None on any failure."""
-    prompt = (
-        "You are a commodities analyst. Explain this MCX CrudeOil options signal.\n"
-        "The grade, direction and confidence are FIXED — do not dispute or recompute them.\n\n"
-        f"{json.dumps(asdict(signal), indent=2)}\n\n"
-        'Reply with JSON only: {"key_drivers": [3 short strings], '
-        '"risks": [2-4 short strings], "reasoning": "2-3 sentences"}'
-    )
-
+def _load(path, label):
+    if not path.exists():
+        raise InputError("Input file missing", f"{label} ({path.name}) not found - did its script run?")
     try:
-        if mode == "groq":
-            from groq import Groq
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise InputError("Invalid JSON", f"{label} ({path.name}): {exc}") from exc
+    if not isinstance(data, dict):
+        raise InputError("Invalid JSON", f"{label} ({path.name}) is not a JSON object")
+    return data
 
-            model = env("GROQ_MODEL", "llama-3.3-70b-versatile")
-            api_key = env("GROQ_API_KEY")
-            if not api_key:
-                raise RuntimeError("MODEL_MODE=groq but GROQ_API_KEY is not set")
-            completion = Groq(api_key=api_key).chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                response_format={"type": "json_object"},
-            )
-            content = completion.choices[0].message.content
-        elif mode == "ollama":
-            model = env("OLLAMA_MODEL", "llama3.1")
-            response = httpx.post(
-                f"{env('OLLAMA_URL', 'http://localhost:11434')}/api/generate",
-                json={"model": model, "prompt": prompt, "stream": False, "format": "json"},
-                timeout=60.0,
-            )
-            response.raise_for_status()
-            content = response.json()["response"]
-        else:
-            return None
 
-        parsed = json.loads(content)
-        return (
-            [str(d) for d in parsed["key_drivers"]],
-            [str(r) for r in parsed["risks"]],
-            str(parsed["reasoning"]),
-        )
-    except Exception as exc:  # noqa: BLE001 — narrative is cosmetic, never fail the signal
-        logger.error("AI narrative failed (%s), falling back to rule_based: %s", mode, exc)
+def _load_dated(path, label):
+    data = _load(path, label)
+    if not data.get("release_date"):
+        raise InputError("release_date missing", f"{label} ({path.name}) has no release_date")
+    try:
+        parse_release_date(data["release_date"])
+    except ValueError as exc:
+        raise InputError("release_date invalid", f"{label} ({path.name}): {data['release_date']!r} is not DD-MM-YYYY") from exc
+    return data
+
+
+def _num(data, key):
+    value = data.get(key)
+    return None if value is None else round(float(value), 3)
+
+
+MANDATORY = (("crude_consensus_mb", CONSENSUS_FILE), ("gasoline_consensus_mb", CONSENSUS_FILE),
+             ("distillate_consensus_mb", CONSENSUS_FILE), ("crude_change_mb", EIA_ACTUALS_FILE),
+             ("cushing_change_mb", EIA_ACTUALS_FILE), ("gasoline_change_mb", EIA_ACTUALS_FILE),
+             ("distillate_change_mb", EIA_ACTUALS_FILE),
+             ("api_crude_mb", API_REPORT_FILE))
+
+
+def load_inputs(data_dir=None, today=None, allow_stale=False):
+    """The flat inputs dict (spec key names) plus `release_date`, or raise InputError."""
+    data_dir = data_dir or DATA_DIR
+    consensus = _load_dated(data_dir / CONSENSUS_FILE.name, "consensus")
+    api = _load_dated(data_dir / API_REPORT_FILE.name, "API report")
+    eia = _load_dated(data_dir / EIA_ACTUALS_FILE.name, "EIA actuals")
+
+    if not allow_stale:
+        for label, data, limit in (("consensus", consensus, STALE_DAYS), ("EIA actuals", eia, STALE_DAYS),
+                                   ("API report", api, STALE_DAYS + API_MAX_LEAD_DAYS)):
+            if is_stale(data["release_date"], limit, today):
+                raise InputError("Stale data", f"{label} is for {data['release_date']}, more than {limit} days old "
+                                 "(use --allow-stale to replay)")
+
+    # Consensus and EIA describe the same Wednesday report. The API report is
+    # published the day BEFORE it (Tuesday), so its date is earlier, never equal.
+    if consensus["release_date"] != eia["release_date"]:
+        raise InputError("Release date mismatch", f"consensus {consensus['release_date']} vs "
+                         f"EIA actuals {eia['release_date']}")
+    lead = (parse_release_date(eia["release_date"]) - parse_release_date(api["release_date"])).days
+    if not 0 <= lead <= API_MAX_LEAD_DAYS:
+        raise InputError("Release date mismatch", f"API report {api['release_date']} is not the report released "
+                         f"0-{API_MAX_LEAD_DAYS} days before EIA {eia['release_date']}")
+
+    inputs = {
+        "release_date": eia["release_date"],
+        "crude_consensus_mb": _num(consensus, "crude_consensus_mb"),
+        "gasoline_consensus_mb": _num(consensus, "gasoline_consensus_mb"),
+        "distillate_consensus_mb": _num(consensus, "distillate_consensus_mb"),
+        "crude_change_mb": _num(eia, "crude_change_mb"),
+        "cushing_change_mb": _num(eia, "cushing_change_mb"),
+        "cushing_level_mb": _num(eia, "cushing_level_mb"),
+        "gasoline_change_mb": _num(eia, "gasoline_change_mb"),
+        "distillate_change_mb": _num(eia, "distillate_change_mb"),
+        "refinery_util_change_pct": _num(eia, "refinery_util_change_pct"),
+        "api_crude_mb": _num(api, "api_crude_mb"),
+    }
+    missing = [f"{key} ({path.name})" for key, path in MANDATORY if inputs[key] is None]
+    if missing:
+        raise InputError("Mandatory field missing", ", ".join(missing))
+    return inputs
+
+
+def load_market(data_dir=None, today=None, allow_stale=False):
+    """market.json as a dict with atr_20 and ovx guaranteed, or raise InputError."""
+    data_dir = data_dir or DATA_DIR
+    market = _load(data_dir / MARKET_FILE.name, "market data")
+    missing = [key for key in ("atr_20", "ovx") if market.get(key) is None]
+    if missing:
+        raise InputError("Mandatory field missing", f"{', '.join(missing)} ({MARKET_FILE.name})")
+    fetched = str(market.get("fetched_at", "")).split(" ")[0]
+    try:
+        stale = is_stale(fetched, STALE_DAYS, today)
+    except ValueError as exc:
+        raise InputError("fetched_at invalid", f"market data ({MARKET_FILE.name}): {market.get('fetched_at')!r}") from exc
+    if stale and not allow_stale:
+        raise InputError("Stale data", f"market data was fetched {market['fetched_at']}, more than {STALE_DAYS} days "
+                         "old - run python -m app.market_data (or --allow-stale to replay)")
+    return market
+
+
+LOT_SIZE_SETTINGS = {"CRUDEOIL": "MCX_CRUDEOIL_LOT_SIZE", "CRUDEOILM": "MCX_CRUDEOILM_LOT_SIZE",
+                     "NATURALGAS": "MCX_NATURALGAS_LOT_SIZE", "NATURALGASM": "MCX_NATURALGASM_LOT_SIZE"}
+LOT_COUNT_SETTINGS = {"CRUDEOIL": "MCX_CRUDEOIL_LOTS", "CRUDEOILM": "MCX_CRUDEOILM_LOTS"}
+
+
+def _whole_number(name, what):
+    """The setting as an int of at least 1, None if unset; InputError otherwise."""
+    raw = env(name)
+    if raw is None:
         return None
-
-
-def add_narrative(signal: Signal) -> Signal:
-    """Attach drivers/risks/reasoning, using MODEL_MODE with a rule-based fallback."""
-    mode = (env("MODEL_MODE", "rule_based") or "rule_based").lower()
-    result = _ai_narrative(signal, mode) if mode in ("groq", "ollama") else None
-
-    if result is None:
-        signal.key_drivers, signal.risks, signal.reasoning = rule_based_narrative(signal)
-        signal.model_used = "rule_based"
-    else:
-        signal.key_drivers, signal.risks, signal.reasoning = result
-        signal.model_used = (env("GROQ_MODEL", mode) if mode == "groq" else mode)
-
-    return signal
-
-
-def _require(report: dict | None, name: str, path: object) -> dict:
-    """Return the report dict or raise, naming the file that should have produced it."""
-    if report is None:
-        raise FileNotFoundError(f"{name} missing — expected {path}")
-    return report
-
-
-def main() -> int:
-    """Load the three reports, run the rule engine, save and publish the signal."""
-    setup_logging()
     try:
-        consensus = _require(read_json(CONSENSUS_FILE), "consensus", CONSENSUS_FILE)
-        eia = _require(read_json(EIA_ACTUAL_FILE), "EIA actuals", EIA_ACTUAL_FILE)
-        # The API report is optional — the pipeline still trades without it.
-        api_report = read_json(API_REPORT_FILE) or {}
+        value = int(raw)
+    except ValueError:
+        raise InputError("Invalid setting", f"{name}={raw!r} is not a whole number of {what}") from None
+    if value < 1:
+        raise InputError("Invalid setting", f"{name} must be at least 1, got {raw!r}")
+    return value
 
-        # Every deviation subtracts consensus from actuals, so the two files must
-        # describe the same week. A stale consensus.json — Tuesday's fetch failed
-        # and Wednesday ran anyway — otherwise yields a plausible-looking number
-        # computed across two weeks, which can flip a trade to a skip or back.
-        # The EIA release defines the week, so it is the reference.
-        week = eia.get("week_ending")
-        if consensus.get("week_ending") != week:
-            raise ValueError(
-                f"week mismatch: EIA actuals are for {week} but consensus is for "
-                f"{consensus.get('week_ending')}. Re-run consensus_fetcher.py "
-                f"--week {week} before generating a signal."
-            )
 
-        if api_report and api_report.get("week_ending") != week:
-            logger.warning(
-                "API report is for %s, not %s — ignoring it rather than letting "
-                "another week's number move confidence",
-                api_report.get("week_ending"), week,
-            )
-            api_report = {}
+def load_lot_sizes():
+    """{contract: barrels (or mmBtu) per lot or None}: the exchange's contract sizes, from MCX_CRUDEOIL_LOT_SIZE
+    (100 bbl), MCX_CRUDEOILM_LOT_SIZE (10 bbl) and, reserved for a future setup, MCX_NATURALGAS_LOT_SIZE and
+    MCX_NATURALGASM_LOT_SIZE. A crude value that is not the contract size MCX publishes is refused: the usual
+    cause is putting the NUMBER OF LOTS here (that goes in MCX_CRUDEOIL_LOTS / MCX_CRUDEOILM_LOTS)."""
+    sizes = {contract: _whole_number(name, "barrels") for contract, name in LOT_SIZE_SETTINGS.items()}
+    for contract, size in sizes.items():
+        expected = options.CONTRACT_BARRELS.get(contract)
+        if size is not None and expected is not None and size != expected:
+            raise InputError("Invalid setting", f"{LOT_SIZE_SETTINGS[contract]}={size}: MCX's {contract} lot is {expected} "
+                             f"barrels. To set how many lots you trade, use {LOT_COUNT_SETTINGS[contract]}.")
+    return sizes
 
-        crude_deviation = eia["crude_change_mb"] - consensus["crude_consensus_mb"]
-        gasoline_deviation = eia["gasoline_change_mb"] - consensus["gasoline_consensus_mb"]
-        distillate_deviation = eia["distillate_change_mb"] - consensus["distillate_consensus_mb"]
-        api_crude = api_report.get("api_crude_mb", 0.0)
 
-        if not api_report:
-            logger.warning("No API report found — treating api_crude_mb as 0.0 (contradicts)")
+def load_lot_counts():
+    """{contract: lots or None}: how many lots you trade per signal, from MCX_CRUDEOIL_LOTS and
+    MCX_CRUDEOILM_LOTS. Whole numbers of at least 1."""
+    return {contract: _whole_number(name, "lots") for contract, name in LOT_COUNT_SETTINGS.items()}
 
-        signal = generate_signal(
-            crude_deviation_mb=crude_deviation,
-            gasoline_deviation_mb=gasoline_deviation,
-            distillate_deviation_mb=distillate_deviation,
-            cushing_mb=eia["cushing_stocks_mb"],
-            api_crude_mb=api_crude,
+
+def sigma_method():
+    """SIGMA_METHOD from .env: "mad" (default, robust) or "std" (plain std dev)."""
+    method = (env("SIGMA_METHOD", "mad") or "mad").lower()
+    if method not in model.SIGMA_METHODS:
+        raise InputError("Invalid setting", f"SIGMA_METHOD={method!r} must be one of {model.SIGMA_METHODS}")
+    return method
+
+
+def load_sigma(release_date, data_dir=None, method="mad"):
+    """(sigma_forecast, weeks used) from the surprise history, excluding the week being traded."""
+    data_dir = data_dir or DATA_DIR
+    history = [r for r in load_history(data_dir / SURPRISE_HISTORY_FILE.name) if r["release_date"] != release_date]
+    try:
+        return model.sigma_forecast(history, method=method), min(len(history), model.SIGMA_WEEKS)
+    except ValueError as exc:
+        raise InputError("Not enough surprise history", str(exc)) from exc
+
+
+# ------------------------------------------------------------------ external calls
+
+def _usd_inr_from_yfinance():
+    result = {}
+
+    def work():
+        try:
+            import yfinance as yf
+            result["rate"] = float(yf.Ticker("INR=X").fast_info["lastPrice"])
+        except Exception as exc:  # noqa: BLE001 - reported by the caller
+            result["error"] = exc
+
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    thread.join(USD_INR_TIMEOUT_S)
+    if "rate" not in result:
+        raise RuntimeError(f"{type(result['error']).__name__}" if "error" in result else "timed out")
+    return result["rate"]
+
+
+def _usd_inr_from_freecurrencyapi(key, get):
+    response = get(FREECURRENCY_URL, params={"apikey": key, "base_currency": "USD", "currencies": "INR"},
+                   timeout=USD_INR_TIMEOUT_S)
+    response.raise_for_status()
+    return float(response.json()["data"]["INR"])
+
+
+def fetch_usd_inr(get=httpx.get):
+    """(rate, source): yfinance first, then FreeCurrencyAPI (needs FREECURRENCYAPI_KEY). A quote outside
+    50-150 is bad data, not a rate. If neither source delivers, raise InputError: there is deliberately NO
+    default rate (the old 84.0 was 12% off the live ~96 and every rupee figure inherits that error).
+
+    Failure text names the exception type and, for HTTP errors, the status code only: the FreeCurrencyAPI
+    key travels in the URL, so str(exc) must never reach a log or a Telegram alert."""
+    key = env("FREECURRENCYAPI_KEY")
+    sources = [("yfinance", _usd_inr_from_yfinance)]
+    if key:
+        sources.append(("freecurrencyapi", lambda: _usd_inr_from_freecurrencyapi(key, get)))
+    problems = [] if key else ["freecurrencyapi: FREECURRENCYAPI_KEY not set"]
+    for name, fetch in sources:
+        try:
+            rate = fetch()
+        except httpx.HTTPStatusError as exc:
+            problems.append(f"{name}: HTTP {exc.response.status_code}")
+            continue
+        except Exception as exc:  # noqa: BLE001 - any failure means try the next source
+            problems.append(f"{name}: {exc if isinstance(exc, RuntimeError) else type(exc).__name__}")
+            continue
+        if USD_INR_PLAUSIBLE[0] < rate < USD_INR_PLAUSIBLE[1]:
+            logger.info("USD/INR %.2f (%s)", rate, name)
+            return rate, name
+        problems.append(f"{name}: implausible {rate}")
+    for problem in problems:
+        logger.warning("USD/INR: %s", problem)
+    raise InputError("USD/INR unavailable", "; ".join(problems))
+
+
+def fmt_optional(value):
+    return f"{value:+.3f}" if value is not None else "N/A"
+
+
+def build_prompt(inputs, calc, signal):
+    status = calc["cushing_status"]
+    return (
+        f"Release: {inputs['release_date']}\n"
+        f"Decision: {signal['action']} | Regime: {signal['regime']} | Direction: {signal['direction']}\n"
+        f"Total liquid surprise: {calc['tls_mb']:+.3f} mb (Z {calc['z_tls']:+.2f}); "
+        f"{'a stock BUILD is bearish for WTI' if calc['tls_mb'] > 0 else 'a stock DRAW is bullish for WTI'}\n"
+        f"Crude surprise: {calc['crude_surprise_mb']:+.3f} mb\n"
+        f"Gasoline surprise: {calc['gasoline_surprise_mb']:+.3f} mb\n"
+        f"Distillate surprise: {calc['distillate_surprise_mb']:+.3f} mb\n"
+        f"Cushing change: {fmt_optional(inputs['cushing_change_mb'])} mb ({status})\n"
+        f"API crude: {inputs['api_crude_mb']:+.3f} mb\n"
+        f"Refinery util change: {fmt_optional(inputs['refinery_util_change_pct'])}%"
+    )
+
+
+def complete_sentences(text):
+    """`text` cut back to its last complete sentence (unchanged if it has none)."""
+    ends = list(_SENTENCE_END.finditer(text))
+    return text[:ends[-1].end()] if ends else text
+
+
+def generate_analysis(user_prompt):
+    """(analysis, model_used) from Groq, or ("", "rule_based") if the key is missing or
+    anything fails. The only place a model is involved, and it only writes prose."""
+    api_key = env("GROQ_API_KEY")
+    if not api_key:
+        logger.info("GROQ_API_KEY not set - no narrative")
+        return "", "rule_based"
+    model_name = env("GROQ_MODEL", "llama-3.3-70b-versatile")
+    try:
+        from groq import Groq
+        response = Groq(api_key=api_key, timeout=GROQ_TIMEOUT_S).chat.completions.create(
+            model=model_name, max_tokens=150, temperature=0.3,
+            messages=[{"role": "system", "content": GROQ_SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
         )
+        choice = response.choices[0]
+        text = choice.message.content.strip() # type: ignore
+        if len(text) > ANALYSIS_MAX_CHARS or getattr(choice, "finish_reason", None) == "length":
+            # over the cap, or the model ran out of tokens mid-sentence: never ship half a sentence
+            text = complete_sentences(text[:ANALYSIS_MAX_CHARS]).strip()  # type: ignore
+    except Exception as exc:  # noqa: BLE001 - the signal ships without a narrative
+        logger.warning("Groq failed (%s: %s) - no narrative", type(exc).__name__, exc)
+        return "", "rule_based"
+    return (text, f"groq/{model_name}") if text else ("", "rule_based")
 
-        # Tradeability gate: the inventory verdict stands, but a near-dead option
-        # is not the instrument the -40/+50/+100 exits were calibrated for.
-        option_expiry, dte = days_to_expiry()
-        logger.info("%s", describe(option_expiry, dte))
-        signal = apply_expiry_gate(signal, dte)
 
-        signal = add_narrative(signal)
+# ------------------------------------------------------------------------ assembly
 
-        # MCX is quoted in INR, the signal is derived from USD WTI. This records
-        # what the rupee is doing and turns it into strike guidance. It never
-        # touches grade, direction or confidence — see app/currency.py for why.
-        market = read_json(MARKET_DATA_FILE)
-        currency_block = currency.context(market, signal.direction, signal.option_type)
-        if signal.grade != "skip":
-            signal.risks.extend(currency.risk_notes(currency_block, signal.direction))
-        if dte is None:
-            signal.risks.append(describe(option_expiry, dte))
+def scorecard(market, api_surprise):
+    """Pre-release conditioning scorecard: True when the threshold is met, None when unknown.
+    Informational - the runbook calls it a filter but does not say how a miss changes the trade."""
+    def above(value, threshold):
+        return None if value is None else value > threshold
+    return {
+        "backwardation": above(market.get("cl1_cl2"), SCORECARD_THRESHOLDS["backwardation_cl1_cl2"]),
+        "crack_321": above(market.get("crack_321"), SCORECARD_THRESHOLDS["crack_321"]),
+        "brent_wti": above(market.get("brent_wti"), SCORECARD_THRESHOLDS["brent_wti"]),
+        "api_prepositioned": abs(api_surprise) > model.API_PREPOSITIONED_MB,
+    }
 
-        week = eia.get("week_ending") or week_ending()
-        payload = {
-            "week_ending": week,
-            "setup": "TWPR",
-            "trade_type": env("TWPR_TRADE_TYPE", "paper"),
-            **asdict(signal),
-            **currency_block,
-            "option_expiry": option_expiry.isoformat() if option_expiry else None,
-            "days_to_expiry": dte,
-            "generated_at": now_utc().isoformat(),
-        }
-        write_json(SIGNAL_FILE, payload)
-        logger.info(
-            "Signal: Grade %s %s | confidence %s | deviation %+.3f mb",
-            signal.grade,
-            signal.direction,
-            signal.confidence,
-            crude_deviation,
-        )
 
-        PetroCoreClient().post_signal(payload)
+def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
+                 analyse=generate_analysis, generated_at=None, sigma_method="mad"):
+    """The full signal.json payload from validated inputs, market data and sigma_forecast."""
+    release_day = parse_release_date(inputs["release_date"])
+    month = release_day.month
+    surprises = {
+        "crude": round(inputs["crude_change_mb"] - inputs["crude_consensus_mb"], 3),
+        "gasoline": round(inputs["gasoline_change_mb"] - inputs["gasoline_consensus_mb"], 3),
+        "distillate": round(inputs["distillate_change_mb"] - inputs["distillate_consensus_mb"], 3),
+    }
+    tls = model.tls(surprises["crude"], surprises["gasoline"], surprises["distillate"], month)
+    z = model.z_score(tls, sigma)
+    contradicts = model.cushing_contradicts(tls, inputs["cushing_change_mb"])
+    rally = market.get("overnight_rally_usd")
+    multiplier = model.cushing_multiplier(inputs["cushing_level_mb"])
+    beta = model.beta_vol(market["atr_20"], market["ovx"])
+    api_surprise = round(inputs["api_crude_mb"] - inputs["crude_consensus_mb"], 3)
+    regime, direction = model.classify(tls, z, contradicts, inputs["crude_change_mb"],
+                                       inputs["crude_consensus_mb"], inputs["api_crude_mb"], rally)
+    setup3 = model.regime3_setup(tls, inputs["crude_change_mb"], inputs["crude_consensus_mb"], inputs["api_crude_mb"])
+
+    calc = {
+        "crude_surprise_mb": surprises["crude"], "gasoline_surprise_mb": surprises["gasoline"],
+        "distillate_surprise_mb": surprises["distillate"],
+        "omega_gasoline": model.omega_gasoline(month), "omega_distillate": model.omega_distillate(month),
+        "tls_mb": round(tls, 3), "sigma_forecast_mb": round(sigma, 3), "sigma_method": sigma_method, "z_tls": round(z, 2),
+        "cushing_contradicts": contradicts, "cushing_status": model.cushing_status(tls, inputs["cushing_change_mb"]),
+        "cushing_multiplier": round(multiplier, 3),
+        "regime3_setup": setup3, "overnight_rally_usd": rally,
+        "cushing_level_known": inputs["cushing_level_mb"] is not None,
+        "api_surprise_mb": api_surprise, "api_aligns": (tls > 0) == (inputs["api_crude_mb"] > 0),
+        "beta_vol": round(beta, 3),
+    }
+    signal = {"action": "trade" if regime else "stand_down", "regime": regime, "direction": direction,
+              "option_type": "NONE", "strike_type": "NONE"}
+    move = option = sizing = None
+    checklist = []
+    if regime:
+        signal["option_type"] = "CALL" if direction == "bullish" else "PUT"
+        signal["strike_type"] = "ITM"
+        low, high, deepened = options.target_delta(market["ovx"])
+        option = {"delta_low": low, "delta_high": high, "ovx_deepened": deepened, "ovx": market["ovx"],
+                  **options.pick_expiry(release_day)}
+        if market.get("wti"):   # no option chain: an estimate of where the target-delta strikes sit
+            option["strike_guide"] = options.strike_guidance(
+                market["wti"] * usd_inr, market["ovx"], max(option["days_to_expiry"], 1), (low, high),
+                signal["option_type"])
+        if lots:   # {contract: lots} for the contracts you configured
+            sizing = options.sizing(lots, usd_inr, (low, high))
+        if regime == 1:   # Regimes 2 and 3 target chart levels, not a modelled move
+            usd = model.expected_move_usd(tls, beta, multiplier)
+            anchor = model.anchor_move_usd(tls)
+            move = {"wti_usd": round(usd, 2), "mcx_inr": int(round(usd * usd_inr)),
+                    "per_mb_usd": round(abs(usd) / abs(tls), 3), "sanity_ok": model.sanity_ok(tls, usd),
+                    "anchor_low_usd": anchor[0], "anchor_high_usd": anchor[1],
+                    "anchor_low_inr": int(round(anchor[0] * usd_inr)), "anchor_high_inr": int(round(anchor[1] * usd_inr)),
+                    "band": options.band_context(anchor[1] * usd_inr, market["wti"] * usd_inr) if market.get("wti") else None}
+        checklist = REGIME_CHECK[regime] + ([TIME_SPREAD_CHECK] if regime == 1 and direction == "bullish" else [])             + ALWAYS_CHECK
+        if option["expiry_source"] != "mcx_calendar":
+            checklist.insert(0, f"The expiry date {option['expiry_date']} is a GUESS (that month is not in the MCX "
+                             "calendar loaded: the 19th, or the business day before): check it on your chain.")
+        if setup3 and regime != 3:
+            checklist.insert(0, "Regime 3 inventory setup is present but the overnight rally is "
+                             + ("unknown" if rally is None else f"only {rally:+.2f} USD (needs more than +1.00)")
+                             + ", so it was not fired.")
+    schedule = options.release_schedule(release_day)
+    evening_open, closed_reason = options.mcx_evening_session(release_day)
+    schedule["mcx_evening_open"], schedule["mcx_closed_reason"] = evening_open, closed_reason
+    if regime and not evening_open:
+        checklist.insert(0, f"MCX's EVENING SESSION IS CLOSED on {inputs['release_date']} ({closed_reason}): "
+                            "this signal cannot be traded today.")
+    fx = {"usd_inr": round(usd_inr, 2), "usd_inr_source": usd_inr_source}
+
+    if regime:
+        analysis, model_used = analyse(build_prompt(inputs, calc, signal))
+    else:   # nothing to explain, and a model asked to explain noise will invent a direction
+        analysis, model_used = "", "rule_based"
+    return {
+        "release_date": inputs["release_date"],
+        "generated_at": generated_at or fmt_ts(now_ist()),
+        "inputs": {**{k: v for k, v in inputs.items() if k != "release_date"},
+                   "atr_20": market["atr_20"], "ovx": market["ovx"], **fx},
+        "calculations": calc,
+        "signal": signal,
+        "expected_move": None if move is None else {**move, **fx},
+        "option": option,
+        "currency": currency.context(market.get("usd_inr_trend_pct"), direction) if regime else None,
+        "sizing": sizing,
+        "scorecard": scorecard(market, api_surprise),
+        "schedule": schedule,
+        "checklist": checklist,
+        "analysis": analysis,
+        "model_used": model_used,
+    }
+
+
+def main(argv=None):
+    setup_logging()
+    load_dotenv(ROOT / ".env")
+    parser = argparse.ArgumentParser(description="Generate the TWPR signal")
+    parser.add_argument("--allow-stale", action="store_true", help="accept input files older than %d days (replay)" % STALE_DAYS)
+    args = parser.parse_args(argv)
+    try:
+        inputs = load_inputs(allow_stale=args.allow_stale)
+        market = load_market(allow_stale=args.allow_stale)
+        method = sigma_method()
+        sigma, weeks = load_sigma(inputs["release_date"], method=method)
+        load_lot_sizes()   # refuses a lot size that is not MCX's (the usual mistake: a lot COUNT in a SIZE setting)
+        lots = {contract: n for contract, n in load_lot_counts().items() if n}
+        if not lots:
+            logger.warning("MCX_CRUDEOIL_LOTS / MCX_CRUDEOILM_LOTS not set - no lot count in the signal")
+        usd_inr, source = fetch_usd_inr()
+        signal = build_signal(inputs, market, sigma, usd_inr, source, lots=lots or None, sigma_method=method)
+        write_json(SIGNAL_FILE, signal)
+        record_week(inputs, inputs)   # this week's surprises join the history (no-op if already there)
+        s, c = signal["signal"], signal["calculations"]
+        logger.info("signal for %s: %s | regime %s %s | TLS %+.3f Z %+.2f (sigma %.3f %s, %d wks) | %s %s | model %s",
+                    signal["release_date"], s["action"], s["regime"], s["direction"], c["tls_mb"], c["z_tls"],
+                    c["sigma_forecast_mb"], c["sigma_method"], weeks, s["option_type"], s["strike_type"], signal["model_used"])
         return 0
-    except Exception as exc:  # noqa: BLE001 — top-level guard
-        logger.exception("signal_engine.py failed")
-        send_error("signal_engine.py", exc)
+    except InputError as exc:
+        logger.error("%s", exc)
+        send_error("signal_engine.py", f"{exc.title}\n{exc.detail}")
+        return 1
+    except Exception as exc:  # noqa: BLE001 - top-level guard
+        logger.exception("signal_engine failed")
+        send_error("signal_engine.py", f"Unexpected {type(exc).__name__}: {exc}")
         return 1
 
 

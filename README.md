@@ -1,213 +1,196 @@
-# TWPR (The Weekly Petroleum Report) — TradeDesk's Setup 2
+# TWPR — The Weekly Petroleum Report
 
-Systematic weekly options setup on MCX CrudeOil. Three data releases produce one
-directional signal and at most one trade, every Wednesday. 52 times a year.
+A systematic weekly options setup on MCX CrudeOil, trading the gap between
+analyst consensus and the EIA Weekly Petroleum Status Report. Options buyer
+only, never a seller, risking 1% of capital per event.
 
-Options **buyer only**, never a seller. Max 2% of capital per Grade A trade.
+## Status: rebuilding
 
-Full rules: [`docs/twpr_setup_spec.md`](docs/twpr_setup_spec.md).
-Working notes for Claude Code: [`CLAUDE.md`](CLAUDE.md).
+The previous pipeline (consensus/actuals fetchers, the rule engine, the
+expiry gate, currency context, position monitoring/journaling, Telegram
+delivery, the test suite, and the GitHub Actions schedule) was removed on
+2026-09-29 to rebuild it cleanly. None of that runs right now. What's here
+today is the first piece of the rebuild: browser-automation scrapers for the
+two consensus/actuals sources.
 
-## The week (IST)
+See [CLAUDE.md](CLAUDE.md) for the current architecture and what's still
+missing.
 
-```
-Mon-Fri  09:00  market_data.py         WTI/Brent/DXY/USDINR + EIA M1-M2
-Tuesday  19:00  consensus_fetcher.py   analyst survey       -> data/consensus.json
-Wed      01:45  api_monitor.py         API private report   -> data/api_report.json
-Wed      19:30  telegram_bot.py --prebrief
-Wed      20:00  eia_parser.py          EIA WPSR actuals     -> data/eia_actual.json
-                signal_engine.py       5-step rule engine   -> data/signal.json
-                telegram_bot.py        the alert
-Wed      20:05  monitor.py             exit monitor, hard close 22:30 IST
-```
+## What's here
 
-## Build status
-
-| Component | State | How it was checked |
-| --------- | ----- | ------------------ |
-| `signal_engine.py` | done | 31 tests green; reference week end-to-end on fixtures |
-| `petrocore_client.py` | done | 10s timeout, 2×2s retry on 5xx, never raises; skip path exercised |
-| `market_data.py` | done | live fetch; WTI curve from dated NYMEX contracts, derived columns hand-checked |
-| `eia_parser.py` | done | scraper fallback live-verified; API series ids still unconfirmed (no key yet) |
-| `telegram_bot.py` | done | all five message shapes rendered (signal, skip, stop, target, hard close) |
-| `monitor.py` | done | exit conditions incl. partial T1 then hard close on a 4-lot position |
-| `journal.py` | done | P&L and charges unit-tested; stats and empty-journal case rendered |
-| `scheduler.py` | done | `--next` prints the correct IST cron times |
-| `consensus_fetcher.py` | done | live scrape from both sources; fallback chain tested |
-| `api_monitor.py` | done | live scrape from Trading Economics |
-| `tradingeconomics_scraper.py` | done | plain HTTP; live consensus, API report and EIA actuals |
-| `investing_scraper.py` | done | headless Chromium; live consensus and EIA actuals |
-| GitHub Actions | done | 4 workflows, YAML validated |
-
-Not yet proven: a full live Wednesday. Every input can now be sourced without an
-API key — a complete pipeline for week ending 2026-09-18 ran entirely from
-scraped data and produced Grade A bearish at confidence 85 (deviation +3.569 mb).
+`app/scraper/` — Playwright-based scrapers for TradingEconomics and
+investing.com economic-calendar pages, the two sources the signal will need
+for analyst consensus and EIA/API actuals. Both return the same row shape
+(`release_date`, IST `time`, and `actual` / `consensus` / `previous` in million
+barrels); only `consensus` may differ slightly, since the sites poll different analyst
+panels. Both share one base class (`app/scraper/utils/base.py`) that defines
+the response shape, plus parsing helpers in `app/scraper/utils/calendar.py`.
 
 ## Setup
 
 ```bash
 pip install -r requirements.txt
-python -m playwright install chromium    # for the investing.com fallback
-cp .env.example .env                     # then fill in the keys
-python -m pytest tests/ -q
+python -m playwright install chromium
+cp .env.example .env   # not yet read by any code in this repo
 ```
 
-Keep any comment in `.env` on its own line — `python-dotenv` keeps an inline
-`# ...` as the value when the value is empty. `common.env()` treats such a value
-as unset so nothing sends it to an API, but the variable is then simply not
-configured.
+## Running the scrapers
 
-| Variable | Needed? | Notes |
-| -------- | ------- | ----- |
-| `EIA_API_KEY` | no | free at [eia.gov/opendata](https://www.eia.gov/opendata/); without it `eia_parser.py` scrapes instead and `refinery_util_pct` is null. `market_data.py` no longer needs it |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | yes | without them alerts are logged, not sent |
-| `MODEL_MODE` | no | `groq` \| `ollama` \| `rule_based` (default) |
-| `GROQ_API_KEY`, `GROQ_MODEL` | no | only for `MODEL_MODE=groq` |
-| `PETROCORE_URL`, `PETROCORE_API_KEY` | no | unset = POSTs skipped, JSON files still written |
-| `TWPR_TRADE_TYPE` | no | `paper` (default) or `live` |
-| `ANGEL_*` | not yet | reserved for SmartAPI |
-
-Every script runs standalone with only the first two rows filled in.
-
-## Running it
+Both use relative imports, so run them with `-m` from the repo root:
 
 ```bash
-python app/scheduler.py            # local pipeline, runs forever
-python app/scheduler.py --next     # print the next 5 scheduled runs
-python app/scheduler.py --test     # fetch market data once and exit
+python -m app.scraper.sites.tradingeconomics
+python -m app.scraper.sites.investing
 ```
 
-Or step by step. Each fetcher takes manual values so any step can be replayed
-without waiting for the real release:
+Each opens a visible Chromium window and prints one page's
+`{calendar_rows, stats}` for a hardcoded slug (see the `if __name__ ==
+"__main__":` block in each file) — useful for confirming the scraper still
+parses the live page. Not yet wired into anything.
+
+## Consensus fetcher
+
+Fetches the analyst consensus for the next EIA report and writes
+`data/consensus.json`. Both sites are scraped at the same time and the first
+valid answer for each indicator wins (the file records which site supplied which
+number):
 
 ```bash
-python app/market_data.py
-python app/consensus_fetcher.py --crude -1.6 --gasoline 0.5 --distillate -0.3 --previous -2.0
-python app/api_monitor.py --crude 1.25 --cushing 0.2 --gasoline 1.0 --distillate 0.5
-python app/eia_parser.py --once
-python app/signal_engine.py
-python app/telegram_bot.py
-python app/monitor.py              # --resume picks a trade back up
+python -m app.consensus_fetcher                    # next unreleased report
+python -m app.consensus_fetcher --date 23-09-2026  # a specific release date
 ```
 
-In GitHub Actions the same steps run from
-[`.github/workflows/`](.github/workflows/) and commit their JSON output back to
-the repo — the runner is ephemeral, so the committed files are how Wednesday sees
-Tuesday's consensus.
+Consensus is usually only published close to the release; before that the
+command exits non-zero with the reason instead of writing partial data.
+"Consensus" is TradingEconomics' *Consensus* and investing.com's *Forecast* (the
+same figure), named `consensus` throughout.
 
-## Signal logic at a glance
+## API report monitor
 
-All figures in million barrels. Negative is a draw, positive is a build.
-
-```
-crude_deviation_mb = eia_crude_change - consensus_crude
-```
-
-| Deviation | Grade | Direction | Option | Strike | Size |
-| --------- | ----- | --------- | ------ | ------ | ---- |
-| `abs(d) <= 1.0` | skip | neutral | — | — | — |
-| `d <= -1.5` | A | bullish | call | ATM | 2.0% |
-| `-1.5 < d <= -1.0` | B | bullish | call | 1-OTM | 1.5% |
-| `1.0 < d < 1.5` | B | bearish | put | 1-OTM | 1.5% |
-| `d >= 1.5` | A | bearish | put | ATM | 2.0% |
-
-Before any of it, a **days-to-expiry gate**: if the near-month option has fewer
-than 3 calendar days left the week is skipped outright, whatever the deviation.
-MCX crude options expire 2–4 days *before* the futures, and a near-dead option has
-the wrong gamma and spread for a −40%/+50% structure. Costs ~7 of 52 weeks.
-
-Then: Cushing moving against the direction downgrades A to B (B is the floor);
-a strong same-way move in products is noted as a risk only; confidence is
-`75/55 ± 5 (Cushing) ± 5 (API)`, range 45–85.
-
-Exits, enforced by `monitor.py` every 60s: stop at −40%, target 1 at +50%
-(half off, once), target 2 at +100%, hard close 22:30 IST. Stop is checked
-before the hard close.
-
-### Currency context
-
-MCX is quoted in INR, WTI in USD, so `MCX ≈ WTI × USD/INR`. The signal carries
-`usd_inr_trend_pct`, `currency_direction`, `currency_effect`,
-`mcx_implied_level` and the `strike_atm` / `strike_1_otm` guidance, plus risk
-notes when the rupee moves against the trade.
-
-It does **not** move grade, direction or confidence. Onshore USD/INR trades
-09:00–17:00 IST while TWPR holds 20:00–22:30 IST, so FX is shut for the whole
-trade; over six months the rupee flipped the sign of the MCX move versus WTI on
-3.2% of days. It decides which strike is at the money, not which way to bet.
-
-## Journal
+Captures the API (American Petroleum Institute) weekly inventory report into
+`data/api_report.json`: crude, Cushing, gasoline and distillate changes in
+million barrels, with the source of each. Crude is raced between both sites; the
+other three legs come from TradingEconomics only, cross-checked against the dated
+crude row so a stale week is rejected. Cushing/gasoline/distillate are 2-decimal.
 
 ```bash
-python app/journal.py log      # log a completed trade (pre-fills from active_trade.json)
-python app/journal.py week
-python app/journal.py month
-python app/journal.py stats
-python app/journal.py export   # -> data/journal_export.csv
+python -m app.api_monitor              # latest due report, polls until it is out
+python -m app.api_monitor --once       # single attempt
+python -m app.api_monitor --date 22-09-2026 --once
 ```
 
-## Tests
+## EIA actuals
+
+Captures the EIA Weekly Petroleum Status Report into `data/eia_actuals.json`:
+crude, Cushing, gasoline and distillate stock changes (million barrels, negative
+= draw). Both sites race and the first to return the complete report wins.
+investing.com's week-over-week refinery utilisation *change* is included as
+`refinery_util_change_pct` (best effort; `null` if it doesn't arrive in time). The
+utilisation level itself is not available from either site.
 
 ```bash
-python -m pytest tests/ -q                                  # offline, fast
-python -m pytest tests/test_signal_engine.py::test_reference_week_sep4_2026 -v
-python -m pytest tests/test_strike_interval.py -m network -v # checks the live MCX chain
+python -m app.eia_actuals                           # today's report, polls until it is out
+python -m app.eia_actuals --once
+python -m app.eia_actuals --date 23-09-2026 --once  # replay a release
 ```
 
-31 tests. The rule engine: skip zone and grade boundaries (both
-inclusive), the Cushing downgrade and its B floor, API alignment, the confidence
-grid, determinism over repeated runs, and the Sep 4 2026 reference week —
-deviation +1.209 mb must come out Grade B bearish at confidence 55, every time.
-The journal: CTT, brokerage and net P&L on the worked example.
+## Signal engine
 
-## Layout
+Applies the WPSR runbook model (`docs/WPSR_WEDNESDAY_RUNBOOK.md` and the MCX options
+adaptation) and writes `data/signal.json`: the total liquid surprise (TLS) and its
+Z-score against the last 12 weeks, the Cushing check, the regime (1 aligned, 2 fade,
+3 sell-the-fact, or stand down when |Z| < 1.25), the expected WTI / MCX move, the ITM
+option to buy (delta 0.60-0.70, or 0.80-0.85 when OVX is above 35), the expiry, lots for
+the INR risk of your lot count, the IST clock and a checklist of what only the chart can settle. The rules are
+deterministic; the optional Groq paragraph is narrative only and never affects the trade.
 
-```
-app/
-  common.py              paths, logging, IST clock, JSON helpers
-  petrocore_client.py    PetroCore HTTP client — optional, never raises
-  telegram_bot.py        alerts + the shared send_message/send_error
-  market_data.py         yfinance spot + the two nearest NYMEX contracts
-  consensus_fetcher.py   Tuesday consensus
-  api_monitor.py         API private report
-  tradingeconomics_scraper.py  consensus + API report, plain HTTP (primary)
-  investing_scraper.py         consensus via headless Chromium (fallback)
-  eia_parser.py          EIA WPSR actuals
-  signal_engine.py       the 5-step rule engine
-  monitor.py             post-signal exit monitor
-  journal.py             trade log and statistics
-  currency.py            INR context and MCX strike guidance
-  expiry.py              option expiry calendar and the DTE gate
-  scheduler.py           local APScheduler pipeline
-tests/                   rule engine tests, including the reference week
-docs/twpr_setup_spec.md  source of truth for the rules
-data/                    pipeline output; reference_week.json is the fixture
+```bash
+python -m app.market_data                  # ATR, OVX, spreads -> data/market.json (run before the print)
+python -m app.surprise_history --backfill  # one-off: the weekly surprise history that sets sigma
+python -m app.signal_engine                # the five data files -> data/signal.json
+python -m app.signal_engine --allow-stale  # replay older files
 ```
 
-## Design decisions
+`SIGMA_METHOD` (`mad`, the default, or `std`) sets how the Z-score's noise floor is measured;
+`mad` keeps one freak week from locking out real signals for 12 weeks.
 
-- **JSON files are the system of record.** PetroCore is a mirror. A PetroCore
-  outage logs a warning and the trade goes ahead.
-- **The AI never touches a number.** `MODEL_MODE` only selects who writes
-  `key_drivers`, `risks` and `reasoning`. Grade, direction, confidence and the
-  trade recommendation come from the rule engine and are identical whatever
-  `MODEL_MODE` is set to. Any AI failure falls back to `rule_based`.
-- **Pipeline data is committed.** `data/*.json` lands in the repo so the
-  ephemeral Actions runner has Tuesday's numbers on Wednesday, and the history
-  doubles as an audit trail. `active_trade.json`, `journal.json` and the CSV
-  export stay local.
-- **No invented scrapers.** A wrong consensus number corrupts every downstream
-  signal, so the fetchers ask rather than guess.
+Set `MCX_CRUDEOIL_LOTS` in `.env` (how many lots you trade per signal; the runbook's
+validation window is 1) and the message shows what those lots lose in INR if the option stop is hit.
+`MCX_CRUDEOILM_LOTS` does the same for the mini contract. `MCX_CRUDEOIL_LOT_SIZE` (100) and
+`MCX_CRUDEOILM_LOT_SIZE` (10) are MCX's contract sizes in barrels, checked against the published values;
+`MCX_NATURALGAS_LOT_SIZE` and `MCX_NATURALGASM_LOT_SIZE` are reserved for a future natural gas setup. Needs `GROQ_API_KEY` (and a `GROQ_MODEL` your account can use)
+for the narrative, and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for alerts. All optional.
 
-## Not wired up yet
+## Release day
 
-- Angel One SmartAPI — `monitor.py` prompts for the option premium each minute.
-  `read_current_premium()` is the single function to replace.
-- EIA weekly series ids in `eia_parser.py` (`WCESTUS1`,
-  `W_EPC0_SAX_YCUOK_MBBL`, `WGTSTUS1`, `WDISTUS1`, `WPULEUS3`) need one live run
-  to confirm. No longer load-bearing — a scraper covers the week — but the first
-  suspect if the API path logs no rows.
-- PetroCore's `eia-report` endpoint rejects a scraped `source` with a 422 until
-  its enum accepts `tradingeconomics.com` / `investing.com`.
-- MCX close in `market_data.py` is `wti_close × usd_inr_close` — an
-  approximation, not exchange settlement.
+Run the phases in order (each stops at the first failure and alerts you):
+
+```bash
+python -m app.run pre                  # afternoon: consensus, API report, market data, then the pre-brief
+python -m app.run print --watch        # a few minutes before the print: actuals, signal, alert, then reminders
+python -m app.run all --replay 23-09-2026   # a past release end to end (replay-stamped)
+```
+
+- **`app.pre_brief`** tells you before the print how large a surprise the model needs before it will trade.
+- **`app.watch`** reminds you of the 35-minute time stop and the hard exit. Execution is manual: nothing here places
+  or changes an order, and it cannot see your option premium.
+- **`app.journal`** keeps score: `fill` logs a trade (slippage, estimated net), `path` records WTI after the print
+  (within ~7 days), `show` summarises.
+- **USD/INR** comes from yfinance, then FreeCurrencyAPI (`FREECURRENCYAPI_KEY`); with neither, the signal stops and
+  alerts rather than guessing a rate.
+
+Scheduling is those commands at fixed times (Task Scheduler on Windows, cron elsewhere). The scrapers use a headed
+browser, so the machine needs a logged-in desktop session.
+
+## Telegram alerts
+
+`python -m app.telegram_bot` sends the signal to your Telegram chat. It refuses a
+signal older than 2 days (so a failed engine run can't resend last week's trade);
+`--allow-stale` sends a replay clearly marked as one. Every pipeline script also
+alerts Telegram if it fails. Configure `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
+
+## Where the URLs live
+
+All slugs are in `app/scraper/sources.py`, keyed by indicator name (`eia_crude`,
+`api_crude`, ...) and site. Fix a moved URL or add a site there; nothing else
+holds a URL. Check they still work with:
+
+```bash
+python -m pytest tests/test_sources.py -m network -k tradingeconomics
+```
+
+## Looking up a specific release
+
+Pass the release date (`DD-MM-YYYY`) to `fetch_release`; you get the matching
+calendar row or `None`. Omit the date for the latest released row. Both slug and
+date are yours to choose:
+
+```python
+from app.scraper.sites.tradingeconomics import TradingEconomicsScraper
+from app.scraper.sites.investing import InvestingCalendarScraper
+
+with TradingEconomicsScraper() as s:
+    s.fetch_release("united-states/crude-oil-stocks-change", "23-09-2026")
+
+with InvestingCalendarScraper() as s:
+    s.fetch_release("eia-crude-oil-inventories-75", "23-09-2026")
+# {'release_date': '23-09-2026', 'time': '08:00 PM', 'actual': 2.969,
+#  'consensus': -0.6 (TE) / -0.7 (investing), 'previous': -0.64}
+```
+
+Or from the command line:
+
+```bash
+python -m app.scraper.sites.investing --slug eia-crude-oil-inventories-75 --date 23-09-2026
+```
+
+## Known issues
+
+- investing.com: fetch one slug per session — a second page load in the same
+  session got 403 on every attempt in testing. Derive what you need from one
+  `fetch_page`. It also rate-limits and blocks. A fresh session often gets a 403 that
+  a reload clears (the scraper reloads up to twice); sustained 429s from the
+  same IP do not clear, so wait or change network. TradingEconomics is the more
+  reliable source; treat investing.com as a flaky fallback.
+- The browser runs with a visible window (`headless=False`), so it needs a
+  display and won't run as-is on a headless CI runner.

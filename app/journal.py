@@ -1,277 +1,209 @@
-"""TWPR trade journal: log completed trades and report performance.
+"""Trade journal and post-print price log: the record that tells you whether this works. You execute by hand;
+this keeps score. Nothing here places or changes an order.
 
-Usage:
-    python app/journal.py log     # log a completed trade interactively
-    python app/journal.py week    # summary of the current week
-    python app/journal.py month   # summary of the current month
-    python app/journal.py stats   # all-time statistics
-    python app/journal.py export  # export to CSV
+    python -m app.journal fill --contract CRUDEOILM --option PUT --strike 9800 --lots 1 \\
+        --entry-premium 1310 --exit-premium 1342 --exit-reason time_stop --intended-premium 1305
+    python -m app.journal path [--date 23-09-2026]     # WTI after the print, run within ~7 days of it
+    python -m app.journal show                         # trades and the price-path statistics
+
+Two questions it exists to answer (runbook section 6.1): how much do fills cost against the price you meant to
+pay (slippage), and how much of the expected move is still there by the time you can enter (the price path
+after the print, in the direction of the signal)? Nine weeks of history cannot answer either; this can, one
+Wednesday at a time.
+
+Charges are ESTIMATES carried over from the earlier pipeline (0.05% commodities transaction tax on the sold
+premium, Rs 20 brokerage a leg): check them against your contract note before believing the net figure.
 """
-
-from __future__ import annotations
-
 import argparse
-import csv
+import json
 import logging
 import sys
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 
-from common import DATA_DIR, now_ist, read_json, setup_logging, week_ending, write_json
-from petrocore_client import PetroCoreClient
+from app.market_data import NEW_YORK, PRINT_ET, price_at
+from app.options import CONTRACT_BARRELS
+from app.utils.common import DATE_FORMAT, JOURNAL_FILE, ROOT, SIGNAL_FILE, fmt, fmt_ts, now_ist, setup_logging, write_json
 
-load_dotenv()
+logger = logging.getLogger("twpr.journal")
 
-logger = logging.getLogger(__name__)
-
-JOURNAL_FILE = DATA_DIR / "journal.json"
-ACTIVE_TRADE_FILE = DATA_DIR / "active_trade.json"
-EXPORT_FILE = DATA_DIR / "journal_export.csv"
-
-LOT_SIZE = 100  # barrels per MCX CrudeOil lot
-CTT_RATE = 0.0005  # 0.05% Commodities Transaction Tax on the premium
-BROKERAGE_PER_LEG = 20.0  # INR, Zerodha
-
-EXIT_TYPES = ("stop", "target_1", "target_2", "hard_close", "manual")
-
-RULE = "─" * 30
-HEADER = "TradeDesk — TWPR Performance"
+CTT_RATE = 0.0005            # ASSUMPTION: 0.05% of the premium on the sell leg
+BROKERAGE_PER_LEG_INR = 20.0  # ASSUMPTION: a flat Rs 20 a leg
+EXIT_REASONS = ("stop", "time_stop", "chop", "hard_exit", "scale_out", "target", "manual")
+PATH_OFFSETS_MIN = (0, 1, 2, 5, 10, 15, 30, 60)   # minutes after the print (10:30 ET)
 
 
-def calculate_pnl(entry_premium: float, exit_premium: float, lots: int) -> dict:
-    """Gross P&L, charges, net P&L and return percent for one round trip."""
-    gross_pnl = (exit_premium - entry_premium) * lots * LOT_SIZE
-    ctt_charge = entry_premium * lots * LOT_SIZE * CTT_RATE
-    brokerage = BROKERAGE_PER_LEG * 2  # entry + exit
-    return {
-        "gross_pnl": round(gross_pnl, 2),
-        "ctt_charge": round(ctt_charge, 2),
-        "brokerage": brokerage,
-        "net_pnl": round(gross_pnl - ctt_charge - brokerage, 2),
-        "return_pct": round((exit_premium - entry_premium) / entry_premium * 100, 2),
-        "capital_deployed": round(entry_premium * lots * LOT_SIZE, 2),
-    }
+def pnl(entry_premium, exit_premium, lots, barrels):
+    """Gross, estimated charges, net and return for one long option round trip (premiums in Rs per barrel)."""
+    quantity = lots * barrels
+    gross = (exit_premium - entry_premium) * quantity
+    charges = exit_premium * quantity * CTT_RATE + 2 * BROKERAGE_PER_LEG_INR
+    return {"gross_pnl_inr": round(gross, 2), "charges_inr": round(charges, 2), "net_pnl_inr": round(gross - charges, 2),
+            "return_pct": round((exit_premium - entry_premium) / entry_premium * 100, 2),
+            "capital_deployed_inr": round(entry_premium * quantity, 2)}
 
 
-def load_trades() -> list[dict]:
-    """All logged trades, oldest first."""
-    return (read_json(JOURNAL_FILE) or {}).get("trades", [])
+def load(path=None):
+    path = path or JOURNAL_FILE
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"trades": [], "paths": {}}
 
 
-def save_trades(trades: list[dict]) -> None:
-    """Persist the trade list."""
-    write_json(JOURNAL_FILE, {"trades": trades})
+def signal_snapshot(release_date, path=None):
+    """The signal's decision for `release_date`, or None if signal.json is for another week."""
+    path = path or SIGNAL_FILE
+    try:
+        signal = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if signal.get("release_date") != release_date:
+        return None
+    move = signal.get("expected_move") or {}
+    return {"regime": signal["signal"]["regime"], "direction": signal["signal"]["direction"],
+            "option_type": signal["signal"]["option_type"], "tls_mb": signal["calculations"]["tls_mb"],
+            "z_tls": signal["calculations"]["z_tls"], "expected_wti_usd": move.get("wti_usd")}
 
 
-def _prompt(label: str, default: object = None, cast=str):
-    """Read one value from the terminal, falling back to `default` on blank input."""
-    suffix = f" [{default}]" if default is not None else ""
-    while True:
-        try:
-            raw = input(f"  {label}{suffix}: ").strip()
-        except EOFError as exc:
-            # Ctrl+D, or a piped run that ran out of lines. Half a trade row is
-            # worse than none, so stop rather than save a partial record.
-            raise RuntimeError(f"input ended while waiting for {label!r}") from exc
-        if not raw:
-            if default is not None:
-                return default
-            print("    Required — no default for this field")
-            continue
-        try:
-            return cast(raw)
-        except ValueError:
-            print(f"    Invalid — expected {cast.__name__}")
-
-
-def log_trade() -> dict:
-    """Log one completed trade, pre-filling from data/active_trade.json when present."""
-    active = read_json(ACTIVE_TRADE_FILE) or {}
-    if active.get("status") == "no_trade":
-        active = {}
-
-    # A partially-exited trade has several legs; the journal stores one weighted row.
-    legs = active.get("exits") or []
-    weighted_exit = (
-        sum(leg["exit_premium"] * leg["lots"] for leg in legs) / sum(leg["lots"] for leg in legs)
-        if legs
-        else None
-    )
-
-    print("\nLog a completed trade (blank keeps the bracketed default):")
-    trade = {
-        "week_ending": _prompt("Week ending", active.get("week_ending") or week_ending()),
-        "setup": "TWPR",
-        "trade_type": _prompt("Trade type (paper/live)", active.get("trade_type", "paper")),
-        "grade": _prompt("Grade (A/B)", active.get("grade")),
-        "direction": _prompt("Direction (bullish/bearish)", active.get("direction")),
-        "confidence": _prompt("Confidence", active.get("confidence"), int),
-        "crude_deviation_mb": _prompt(
-            "Crude deviation (mb)", active.get("crude_deviation_mb"), float
-        ),
-        "option_type": _prompt("Option type (call/put)", active.get("option_type")),
-        "strike": _prompt("Strike", active.get("strike"), int),
-        "lots": _prompt("Lots", active.get("lots"), int),
-        "entry_premium": _prompt("Entry premium", active.get("entry_premium"), float),
-        "entry_time": _prompt("Entry time", active.get("entry_time") or now_ist().isoformat()),
-        "exit_premium": _prompt(
-            "Exit premium", round(weighted_exit, 2) if weighted_exit else None, float
-        ),
-        "exit_time": _prompt(
-            "Exit time", legs[-1]["exit_time"] if legs else now_ist().isoformat()
-        ),
-        "exit_type": _prompt(
-            f"Exit type ({'/'.join(EXIT_TYPES)})",
-            legs[-1]["exit_type"] if legs else None,
-        ),
-    }
-
-    trade.update(
-        calculate_pnl(trade["entry_premium"], trade["exit_premium"], trade["lots"])
-    )
-    trade["notes"] = input("  Notes: ").strip()
-
-    trades = load_trades()
-    trade["trade_id"] = max((t.get("trade_id", 0) for t in trades), default=0) + 1
-    trades.append(trade)
-    save_trades(trades)
-
-    # Pre-formatted: %-style logging has no comma flag, only f-strings do.
-    logger.info(
-        "Logged trade #%d: %s %s | net %s (%+.1f%%)",
-        trade["trade_id"],
-        trade["grade"],
-        trade["direction"],
-        f"₹{trade['net_pnl']:+,.0f}",
-        trade["return_pct"],
-    )
-    PetroCoreClient().post_trade(trade)
+def record_fill(journal, release_date, contract, option_type, strike, lots, entry_premium, exit_premium, exit_reason,
+                entry_time=None, exit_time=None, intended_premium=None, notes="", snapshot=None, logged_at=None):
+    """Append one trade to `journal` and return it. Slippage is the entry against the limit you meant to
+    get, in rupees for the whole position (positive = you paid more than intended)."""
+    if contract not in CONTRACT_BARRELS:
+        raise ValueError(f"contract must be one of {tuple(CONTRACT_BARRELS)}")
+    if option_type not in ("CALL", "PUT"):
+        raise ValueError("option type must be CALL or PUT")
+    if exit_reason not in EXIT_REASONS:
+        raise ValueError(f"exit reason must be one of {EXIT_REASONS}")
+    if lots < 1 or entry_premium <= 0 or exit_premium < 0:
+        raise ValueError("lots must be at least 1 and the premiums positive")
+    barrels = CONTRACT_BARRELS[contract]
+    trade = {"release_date": release_date, "contract": contract, "option_type": option_type, "strike": strike,
+             "lots": lots, "entry_premium": entry_premium, "exit_premium": exit_premium, "entry_time": entry_time,
+             "exit_time": exit_time, "intended_premium": intended_premium, "exit_reason": exit_reason, "notes": notes,
+             **pnl(entry_premium, exit_premium, lots, barrels),
+             "slippage_inr": None if intended_premium is None else round((entry_premium - intended_premium) * lots * barrels, 2),
+             "signal": snapshot, "logged_at": logged_at or fmt_ts(now_ist())}
+    journal.setdefault("trades", []).append(trade)
     return trade
 
 
-def _in_period(trade: dict, start: date, end: date) -> bool:
-    """True when the trade's week_ending falls in [start, end]."""
-    try:
-        week = datetime.fromisoformat(trade["week_ending"]).date()
-    except (KeyError, ValueError):
-        return False
-    return start <= week <= end
+def print_time(release_date):
+    """10:30 New York time on the release day (an aware datetime)."""
+    day = datetime.strptime(release_date, DATE_FORMAT)
+    return datetime(day.year, day.month, day.day, *PRINT_ET, tzinfo=NEW_YORK)
 
 
-def summarize(trades: list[dict], title: str) -> str:
-    """Render the performance block for a set of trades."""
-    if not trades:
-        return f"{HEADER}\n{RULE}\nPeriod:         {title}\nNo trades logged.\n"
-
-    wins = [t for t in trades if t["net_pnl"] > 0]
-    losses = [t for t in trades if t["net_pnl"] <= 0]
-    paper = [t for t in trades if t.get("trade_type") == "paper"]
-
-    gross_win = sum(t["net_pnl"] for t in wins)
-    gross_loss = abs(sum(t["net_pnl"] for t in losses))
-    # No losses yet means profit factor is undefined, not infinite — "inf" in a
-    # money report reads like a bug.
-    profit_factor = f"{gross_win / gross_loss:.2f}" if gross_loss else "n/a"
-
-    lines = [
-        HEADER,
-        RULE,
-        f"Period:         {title}",
-        f"Trades logged:  {len(trades)}",
-        f"Paper trades:   {len(paper)}  ({len(trades) - len(paper)} live)",
-        "",
-        f"Win rate:       {len(wins) / len(trades) * 100:.1f}%  "
-        f"({len(wins)}W / {len(losses)}L)",
-    ]
-
-    if wins:
-        lines.append(f"Avg winner:     {sum(t['return_pct'] for t in wins) / len(wins):+.1f}%")
-    if losses:
-        lines.append(f"Avg loser:      {sum(t['return_pct'] for t in losses) / len(losses):+.1f}%")
-    lines.append(f"Profit factor:  {profit_factor}")
-    lines.append("")
-
-    for grade in ("A", "B"):
-        graded = [t for t in trades if t.get("grade") == grade]
-        if not graded:
-            continue
-        grade_wins = [t for t in graded if t["net_pnl"] > 0]
-        lines.append(
-            f"Grade {grade}:        {len(graded)} trades | "
-            f"{len(grade_wins) / len(graded) * 100:.0f}% win rate | "
-            f"avg {sum(t['return_pct'] for t in graded) / len(graded):+.0f}%"
-        )
-
-    lines += ["", "Exits by type:"]
-    for exit_type in EXIT_TYPES:
-        matching = [t for t in trades if t.get("exit_type") == exit_type]
-        if matching:
-            lines.append(
-                f"  {exit_type + ':':<13} {len(matching)} "
-                f"({len(matching) / len(trades) * 100:.0f}%)"
-            )
-
-    net = sum(t["net_pnl"] for t in trades)
-    label = "paper" if len(paper) == len(trades) else "mixed"
-    lines += ["", f"Net P&L:        ₹{net:+,.0f}  ({label})"]
-    return "\n".join(lines)
+def path_from_bars(bars, release_date, offsets=PATH_OFFSETS_MIN):
+    """WTI after the print from 1-minute bars [(aware start, open)]: the price just before it, the price at each
+    offset (minutes after 10:30 ET), the move from the pre-print price, and the high/low of the first hour.
+    None where a price is missing (a gap in the data)."""
+    moment = print_time(release_date)
+    before = price_at(bars, moment - timedelta(seconds=1))
+    if before is None:
+        return None
+    prices = {str(m): price_at(bars, moment + timedelta(minutes=m)) for m in offsets}
+    window = [p for start, p in bars if moment <= start <= moment + timedelta(hours=1)]
+    return {"pre_print": round(before, 2),
+            "prices": {m: None if p is None else round(p, 2) for m, p in prices.items()},
+            "moves": {m: None if p is None else round(p - before, 2) for m, p in prices.items()},
+            "high_1h": round(max(window), 2) if window else None, "low_1h": round(min(window), 2) if window else None}
 
 
-def export_csv() -> int:
-    """Write every logged trade to data/journal_export.csv. Returns the row count."""
-    trades = load_trades()
-    if not trades:
-        logger.warning("No trades to export")
-        return 0
-
-    columns = list(dict.fromkeys(key for trade in trades for key in trade))
-    with EXPORT_FILE.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns)
-        writer.writeheader()
-        writer.writerows(trades)
-
-    logger.info("Exported %d trades to %s", len(trades), EXPORT_FILE)
-    return len(trades)
+def fetch_print_bars(release_date):
+    """1-minute CL=F bars around the print. Yahoo keeps them for about a week."""
+    import yfinance as yf
+    day = print_time(release_date).date()
+    frame = yf.Ticker("CL=F").history(start=day, end=day + timedelta(days=1), interval="1m", timeout=20).dropna()
+    if frame.empty:
+        raise RuntimeError(f"no 1-minute WTI bars for {release_date}: Yahoo keeps them for about 7 days, so run "
+                           "'journal path' soon after the print")
+    return [(ts.to_pydatetime(), float(row.Open)) for ts, row in zip(frame.index, frame.itertuples())]
 
 
-def main() -> int:
-    """Dispatch the journal subcommand."""
+def summarise(journal):
+    """Text lines: the trades, the slippage, and the average move in the signal's direction after the print."""
+    trades, paths = journal.get("trades", []), journal.get("paths", {})
+    lines = []
+    if trades:
+        wins = [t for t in trades if t["net_pnl_inr"] > 0]
+        slips = [t["slippage_inr"] for t in trades if t["slippage_inr"] is not None]
+        lines += [f"Trades: {len(trades)} | wins {len(wins)} ({len(wins) / len(trades):.0%}) | net INR "
+                  f"{sum(t['net_pnl_inr'] for t in trades):+,.0f} | average net INR "
+                  f"{sum(t['net_pnl_inr'] for t in trades) / len(trades):+,.0f}",
+                  "Slippage vs intended (INR, whole position): "
+                  + (f"average {sum(slips) / len(slips):+,.0f} over {len(slips)} fills" if slips else "no intended prices logged")]
+        for t in trades[-5:]:
+            lines.append(f"  {t['release_date']} {t['contract']} {t['option_type']} {t['strike']} x{t['lots']}: "
+                         f"{t['entry_premium']} -> {t['exit_premium']} ({t['exit_reason']}) net {t['net_pnl_inr']:+,.0f}")
+    else:
+        lines.append("Trades: none logged yet")
+    directed = []
+    for release_date, entry in paths.items():
+        direction = (entry.get("signal") or {}).get("direction")
+        sign = {"bullish": 1, "bearish": -1}.get(direction)
+        if sign and entry.get("path"):
+            directed.append({m: None if v is None else sign * v for m, v in entry["path"]["moves"].items()})
+    if directed:
+        lines.append(f"WTI move in the signal's direction after the print ({len(directed)} traded weeks, USD/bbl):")
+        for m in (str(x) for x in PATH_OFFSETS_MIN):
+            values = [d[m] for d in directed if d.get(m) is not None]
+            if values:
+                lines.append(f"  +{m:>2} min: average {sum(values) / len(values):+.2f} (min {min(values):+.2f}, max {max(values):+.2f})")
+    elif paths:
+        lines.append(f"{len(paths)} price paths logged, none for a traded signal yet")
+    return lines
+
+
+def main(argv=None, fetch=fetch_print_bars):
     setup_logging()
-    parser = argparse.ArgumentParser(description="TWPR trade journal")
-    parser.add_argument("command", choices=("log", "week", "month", "stats", "export"))
-    args = parser.parse_args()
+    load_dotenv(ROOT / ".env")
+    parser = argparse.ArgumentParser(description="Trade journal and post-print price log")
+    sub = parser.add_subparsers(dest="command", required=True)
+    fill = sub.add_parser("fill", help="log one completed trade")
+    fill.add_argument("--date", default=None, help="release date DD-MM-YYYY (default: today, IST)")
+    fill.add_argument("--contract", required=True, choices=tuple(CONTRACT_BARRELS))
+    fill.add_argument("--option", required=True, choices=("CALL", "PUT"))
+    fill.add_argument("--strike", required=True, type=int)
+    fill.add_argument("--lots", required=True, type=int)
+    fill.add_argument("--entry-premium", required=True, type=float, help="Rs per barrel")
+    fill.add_argument("--exit-premium", required=True, type=float, help="Rs per barrel")
+    fill.add_argument("--exit-reason", required=True, choices=EXIT_REASONS)
+    fill.add_argument("--intended-premium", type=float, help="the limit price you meant to pay")
+    fill.add_argument("--entry-time", help="HH:MM IST")
+    fill.add_argument("--exit-time", help="HH:MM IST")
+    fill.add_argument("--notes", default="")
+    path = sub.add_parser("path", help="record WTI after the print (within about a week)")
+    path.add_argument("--date", default=None)
+    sub.add_parser("show", help="trades and price-path statistics")
+    args = parser.parse_args(argv)
 
+    journal = load()
+    release_date = getattr(args, "date", None) or fmt(now_ist().date())
     try:
-        if args.command == "log":
-            log_trade()
-            return 0
-        if args.command == "export":
-            return 0 if export_csv() else 1
-
-        today = now_ist().date()
-        trades = load_trades()
-
-        if args.command == "week":
-            start = today - timedelta(days=today.weekday())
-            print(summarize(
-                [t for t in trades if _in_period(t, start, today)],
-                f"week of {start.isoformat()}",
-            ))
-        elif args.command == "month":
-            start = today.replace(day=1)
-            print(summarize(
-                [t for t in trades if _in_period(t, start, today)],
-                f"{start:%b %Y}",
-            ))
+        if args.command == "fill":
+            trade = record_fill(journal, release_date, args.contract, args.option, args.strike, args.lots,
+                                args.entry_premium, args.exit_premium, args.exit_reason, args.entry_time,
+                                args.exit_time, args.intended_premium, args.notes, signal_snapshot(release_date))
+            write_json(JOURNAL_FILE, journal)
+            logger.info("logged: %s %s %s x%d %s -> %s: gross INR %+,.0f, charges (estimate) INR %.0f, net INR %+,.0f%s",
+                        trade["contract"], trade["option_type"], trade["strike"], trade["lots"], trade["entry_premium"],
+                        trade["exit_premium"], trade["gross_pnl_inr"], trade["charges_inr"], trade["net_pnl_inr"],
+                        "" if trade["slippage_inr"] is None else f", slippage INR {trade['slippage_inr']:+,.0f}")
+        elif args.command == "path":
+            found = path_from_bars(fetch(release_date), release_date)
+            if found is None:
+                raise RuntimeError("no price just before the print in the bars returned")
+            journal.setdefault("paths", {})[release_date] = {"path": found, "signal": signal_snapshot(release_date),
+                                                              "logged_at": fmt_ts(now_ist())}
+            write_json(JOURNAL_FILE, journal)
+            logger.info("price path for %s: pre-print %.2f | " + " | ".join(
+                f"+{m}m {v:+.2f}" for m, v in found["moves"].items() if v is not None), release_date, found["pre_print"])
         else:
-            first = min((t["week_ending"] for t in trades), default=None)
-            print(summarize(trades, f"{first} → present" if first else "all time"))
+            for line in summarise(journal):
+                logger.info("%s", line)
         return 0
-    except KeyboardInterrupt:
-        return 130
-    except Exception:
-        logger.exception("journal.py failed")
+    except (ValueError, RuntimeError) as exc:
+        logger.error("%s", exc)
         return 1
 
 
