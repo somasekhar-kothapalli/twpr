@@ -22,57 +22,73 @@ from app.utils.telegram import send_error, send_message
 logger = logging.getLogger("twpr.telegram_bot")
 
 STALE_DAYS = 2
-BULLISH, BEARISH, NEUTRAL = "\U0001F7E2", "\U0001F534", "⚪"
+BULLISH, BEARISH, NEUTRAL = "🟢", "🔴", "⚪"
 
 
 def _mb(value):
     return f"{value:+.3f} mb" if value is not None else "N/A"
 
 
-def _status(flag, yes, no):
-    return yes if flag else no if flag is False else "unknown"
+def _format_sizing(sizing):
+    if not sizing:
+        return ["Sizing: set ACCOUNT_EQUITY_INR in .env for a lot count"]
+    lots = " | ".join(f"${stop}: {n}" for stop, n in sizing["lots_by_futures_stop_usd"].items())
+    cap = f" (capped at {sizing['max_lots']})" if sizing["max_lots"] else ""
+    return [f"Risk 1% = INR {sizing['risk_inr']:,} | lots by futures stop{cap}:", f"  {lots}"]
 
 
 def format_signal(signal, replay_days=None):
     """The Wednesday alert text for a signal.json dict. `replay_days` (int) stamps it
     as an old signal being replayed, not a live one."""
     trade, calc, inputs = signal["signal"], signal["calculations"], signal["inputs"]
-    move = signal["expected_move"]
     lines = []
     if replay_days is not None:
-        lines += [f"\U0001F501 REPLAY - data is {replay_days} days old, NOT a live signal", ""]
+        lines += [f"🔁 REPLAY - data is {replay_days} days old, NOT a live signal", ""]
 
-    if trade["grade"] == "skip":
+    surprises = (f"crude {calc['crude_surprise_mb']:+.3f} | gasoline {calc['gasoline_surprise_mb']:+.3f} | "
+                 f"distillate {calc['distillate_surprise_mb']:+.3f}")
+    if trade["action"] == "stand_down":
         lines += [
-            f"{NEUTRAL} TWPR - NO TRADE",
+            f"{NEUTRAL} TWPR - STAND DOWN",
             f"Release {signal['release_date']}",
             "",
-            f"Crude deviation: {_mb(calc['crude_deviation_mb'])} (inside the ±1.0 skip zone)",
+            f"TLS {calc['tls_mb']:+.3f} mb, Z {calc['z_tls']:+.2f} (sigma {calc['sigma_forecast_mb']:.3f}): "
+            "inside the 1.25 sigma noise band.",
+            f"Surprises: {surprises}",
             "No position this week.",
         ]
     else:
         icon = BULLISH if trade["direction"] == "bullish" else BEARISH
+        cushing = {True: "contradicts", False: "confirms", None: "unknown"}[calc["cushing_contradicts"]]
+        level = inputs.get("cushing_level_mb")
+        option, move, schedule = signal["option"], signal["expected_move"], signal["schedule"]
         lines += [
-            f"{icon} TWPR SIGNAL - Grade {trade['grade']} {trade['direction'].title()}",
+            f"{icon} TWPR SIGNAL - Regime {trade['regime']} {trade['direction'].title()}: "
+            f"{trade['option_type']} {trade['strike_type']}",
             f"Release {signal['release_date']} (generated {signal['generated_at']} IST)",
             "",
-            f"Crude deviation: {_mb(calc['crude_deviation_mb'])} "
-            f"(actual {_mb(inputs['crude_change_mb'])} vs consensus {_mb(inputs['crude_consensus_mb'])})",
-            f"Cushing: {_mb(inputs['cushing_change_mb'])} "
-            f"({_status(calc['cushing_contradicts'], 'contradicts', 'confirms')})",
-            f"API crude: {_mb(inputs['api_crude_mb'])} ({_status(calc['api_aligns'], 'aligns', 'contradicts')})",
-        ]
-        if calc["products_oppose"]:
-            lines.append(f"Products strongly oppose: gasoline {_mb(calc['gasoline_deviation_mb'])}, "
-                         f"distillate {_mb(calc['distillate_deviation_mb'])}")
-        lines += [
+            f"TLS {calc['tls_mb']:+.3f} mb | Z {calc['z_tls']:+.2f} (sigma {calc['sigma_forecast_mb']:.3f})",
+            f"Surprises: {surprises}",
+            f"Cushing: {_mb(inputs['cushing_change_mb'])} ({cushing})"
+            + (f", level {level:.1f} mb, x{calc['cushing_multiplier']:.2f}" if level is not None else ", level unknown"),
+            f"API crude: {_mb(inputs['api_crude_mb'])} ({'aligns' if calc['api_aligns'] else 'contradicts'})",
             "",
-            f"Trade: {trade['option_type']} {trade['strike_type']} | size {trade['size_pct']}% of capital",
-            f"Confidence: {trade['confidence']}",
-            f"Expected WTI move: {move['wti_low']:+.1f} to {move['wti_high']:+.1f} USD "
-            f"= {move['mcx_low']:+,} to {move['mcx_high']:+,} INR on MCX "
-            f"(USD/INR {move['usd_inr']:.2f}, {move['usd_inr_source']})",
+            f"Option: delta {option['delta_low']:.2f}-{option['delta_high']:.2f}"
+            + (f" (OVX {option['ovx']:.1f} above 35, deep ITM)" if option["ovx_deepened"] else "")
+            + f" | expiry {option['expiry_date']} ({option['days_to_expiry']}d"
+            + (", rolled" if option["rolled"] else "") + ")",
         ]
+        if move:
+            lines.append(f"Expected WTI move: {move['wti_usd']:+.2f} USD = {move['mcx_inr']:+,} INR on MCX "
+                         f"(USD/INR {move['usd_inr']:.2f}, {move['usd_inr_source']})"
+                         + ("" if move["sanity_ok"] else f" - outside the 0.15-0.30 USD/mb anchor ({move['per_mb_usd']:.2f}), recheck"))
+        else:
+            lines.append("Targets: chart levels (no modelled move for this regime)")
+        lines += _format_sizing(signal["sizing"])
+        lines += ["",
+                  f"IST: print {schedule['release_ist']} | time stop {schedule['time_stop_ist']} | "
+                  f"hard exit {schedule['hard_exit_ist']} | chop exit {schedule['chop_exit_min']} min",
+                  "", "Checklist:"] + [f"- {item}" for item in signal["checklist"]]
 
     if signal.get("analysis"):
         lines += ["", signal["analysis"]]

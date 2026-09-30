@@ -2,7 +2,7 @@
 
 A systematic weekly options setup on MCX CrudeOil, trading the gap between
 analyst consensus and the EIA Weekly Petroleum Status Report. Options buyer
-only, never a seller, max 2% of capital on a Grade A trade.
+only, never a seller, risking 1% of capital per event.
 
 ## Status: rebuilding
 
@@ -96,18 +96,24 @@ python -m app.eia_actuals --date 23-09-2026 --once  # replay a release
 
 ## Signal engine
 
-Turns the three data files into `data/signal.json`: crude deviation vs consensus,
-grade (A / B / skip), direction, confidence, the option to buy and its size, and the
-expected WTI / MCX move. The rules are deterministic; the optional Groq paragraph is
-narrative only and never affects the trade.
+Applies the WPSR runbook model (`docs/WPSR_WEDNESDAY_RUNBOOK.md` and the MCX options
+adaptation) and writes `data/signal.json`: the total liquid surprise (TLS) and its
+Z-score against the last 12 weeks, the Cushing check, the regime (1 aligned, 2 fade,
+3 sell-the-fact, or stand down when |Z| < 1.25), the expected WTI / MCX move, the ITM
+option to buy (delta 0.60-0.70, or 0.80-0.85 when OVX is above 35), the expiry, lots for
+1% risk, the IST clock and a checklist of what only the chart can settle. The rules are
+deterministic; the optional Groq paragraph is narrative only and never affects the trade.
 
 ```bash
-python -m app.signal_engine                # data/consensus.json + api_report.json + eia_actuals.json
+python -m app.market_data                  # ATR, OVX, spreads -> data/market.json (run before the print)
+python -m app.surprise_history --backfill  # one-off: the weekly surprise history that sets sigma
+python -m app.signal_engine                # the five data files -> data/signal.json
 python -m app.signal_engine --allow-stale  # replay older files
 ```
 
-Needs `GROQ_API_KEY` (and a `GROQ_MODEL` your account can use) for the narrative,
-and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for error alerts. Both are optional.
+Set `ACCOUNT_EQUITY_INR` in `.env` for lot sizing (and `MAX_LOTS=1` for the runbook's
+first-three-weeks cap). Needs `GROQ_API_KEY` (and a `GROQ_MODEL` your account can use)
+for the narrative, and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for alerts. All optional.
 
 ## Telegram alerts
 

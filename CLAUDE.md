@@ -8,7 +8,7 @@ TWPR (The Weekly Petroleum Report) — a systematic weekly options setup on MCX
 CrudeOil, the first setup in the TradeDesk platform. **Real money is meant to
 trade on this repo's output**, once there's a pipeline again — see below.
 
-Options **buyer only**, never a seller. Max 2% of capital on a Grade A trade.
+Options **buyer only**, never a seller. 1% of capital at risk per event (runbook).
 
 ## Current state: gutted, mid-rebuild
 
@@ -61,7 +61,7 @@ python -m app.eia_actuals --date 23-09-2026 --once  # replay a specific release
 python -m app.market_data                          # yfinance inputs -> data/market.json
 python -m app.surprise_history --backfill          # one-off: past weekly surprises -> data/surprise_history.json
 
-python -m app.signal_engine                        # data/*.json -> data/signal.json
+python -m app.signal_engine                        # data/*.json -> data/signal.json (needs market.json + surprise_history.json)
 python -m app.signal_engine --allow-stale          # replay input files older than 2 days
 
 python -m app.telegram_bot                         # send data/signal.json to Telegram
@@ -219,9 +219,9 @@ Released Wed 10:30 ET (20:00 IST); polls every 60 s for up to 90 min unless `--o
 
 ### `app/market_data.py` — market inputs for the runbook model
 
-Spec of record is now the runbook model (`docs/WPSR_WEDNESDAY_RUNBOOK.md` + the MCX options
-adaptation): TLS / Z-score, ITM delta 0.65 (0.80-0.85 when OVX > 35), 1% risk. The
-grade/ATM/2% engine below predates that decision and is being replaced step by step.
+Spec of record is the runbook model (`docs/WPSR_WEDNESDAY_RUNBOOK.md` + the MCX options
+adaptation): TLS / Z-score, ITM delta (0.80-0.85 when OVX > 35), 1% risk. The old
+grade / ATM / 2% engine is gone.
 
 Writes `data/market.json` (`MARKET_FILE`) from yfinance: `atr_20` (simple mean of the last 20
 true ranges of daily WTI bars; today's still-forming bar is excluded), `ovx`, `cl1_cl2`,
@@ -248,71 +248,80 @@ a guess. Expired contracts log a yfinance 404 (harmless).
   returned as this week's), retried 3x20 s, and is `null` if EIA hasn't updated - it never
   sinks the report.
 
-### `app/signal_engine.py` — the signal
+### `app/signal_engine.py`, `app/options.py` — the signal
 
-Reads `consensus.json` + `api_report.json` + `eia_actuals.json`, applies the 5-step
-rules, writes `data/signal.json` (`inputs` / `calculations` / `signal` /
-`expected_move` / `analysis` / `model_used`). No scraping. Telegram is used for
-**errors only** (`utils/telegram.py`, never raises; success alerts are not built).
+Reads `consensus.json`, `api_report.json`, `eia_actuals.json`, `market.json` and
+`surprise_history.json`; writes `data/signal.json`: `inputs`, `calculations`, `signal`
+(`action` trade/stand_down, `regime` 1/2/3/null, `direction`, `option_type`, `strike_type`
+ITM), `expected_move`, `option`, `sizing`, `scorecard`, `schedule`, `checklist`, `analysis`,
+`model_used`. No scraping. The maths is pure and lives in `model.py` (TLS, sigma, Z,
+Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `options.py`
+(delta, expiry gate, lots, DST-aware IST clock); the engine loads, validates and assembles.
 
-- **Pure rule functions** (`calculate_deviations`, `apply_grade_logic`,
-  `apply_cushing_adjustment`, `check_products`, `check_api_alignment`,
-  `calculate_confidence`, `get_trade_recommendation`, `get_expected_move`) take plain
-  values — no I/O, clock or randomness. Boundaries are inclusive: exactly +/-1.0 mb is a
-  skip, exactly +/-1.5 is Grade A. Cushing downgrades A->B, B is the floor, and
-  confidence (base A 75 / B 55, +/-5 Cushing, +/-5 API, clamp 40-85) uses the grade
-  **after** the downgrade. A skip has confidence 0, no trade, and `null` (not
-  false/0) for `cushing_contradicts` / `products_oppose` / `api_aligns`.
-- **The AI boundary:** Groq writes only `analysis`. It never touches grade, direction,
-  confidence or the trade; any failure ships the signal with `analysis: ""`,
-  `model_used: "rule_based"` (a test proves a lying model changes nothing).
-- **`check_products` uses the same-sign rule** (bearish: BOTH product deviations
-  > +2.0; bullish: BOTH < -2.0). The original prompt's formula text was the mirror
-  image and contradicted its own sample output, the reference week
-  (`products_strongly_oppose: true` for +2.669/+2.787 bearish) and the old engine;
-  the user chose the same-sign rule. A flag only, never changes the grade.
-- **Release-date validation:** consensus and EIA actuals must have the **same**
-  `release_date`; the API report's date is the **Tuesday before** (0-3 days earlier),
-  so "all three equal" would always fail on real data. Files older than 2 days are
-  refused (API: 5) unless `--allow-stale`. `release_date` missing/invalid, bad JSON, a
-  missing file, or a missing mandatory field (`crude_consensus_mb`, `crude_change_mb`,
-  `api_crude_mb`) -> Telegram error + exit 1, nothing written. Optional fields become
-  `null` and their checks `None`.
-- **`inputs.refinery_util_change_pct`, not `refinery_util_pct`:** the level no longer
-  exists in `eia_actuals.json` (see eia_actuals), so the change replaces it in `inputs`
-  and in the Groq prompt.
-- **USD/INR** comes from `yfinance` (`INR=X`, 10 s timeout on a daemon thread) or the
-  fallback 84.0; a quote outside 50-150 is treated as bad data. `usd_inr_source` records
-  which. Live 29-09-2026: 95.96, so MCX moves scale accordingly.
-- **Groq caveats (found live):** the spec's default model `llama-3.3-70b-versatile` is
-  **404 for this account**; available chat models are `qwen/qwen3.8-27b` (works),
-  `openai/gpt-oss-20b/120b` (reasoning models: they spend `max_tokens=150` on hidden
-  reasoning and return empty content, so the narrative silently falls back) and
-  `allam-2-7b`. Set `GROQ_MODEL` in `.env` (it is blank today). Groq itself finishes its
-  sentences (`finish_reason='stop'`, ~60 tokens, 230-300 chars). The spec's 200-char cap
-  was what cut them mid-word, so `ANALYSIS_MAX_CHARS` is 450 and an over-long reply (or
-  `finish_reason='length'`) is trimmed back to the last complete sentence
-  (`complete_sentences`; a "." inside "+3.569 mb" is not a sentence end). The model also
-  invents figures absent from the inputs (e.g. a "$0.50 drop"). The narrative is
-  display-only, but do not trust its numbers.
-- Input `load_inputs(data_dir=None)` resolves `DATA_DIR` at call time; an import-time
-  default silently ignores test patching and reads the real `data/`.
+- **Decision:** TLS = crude + w_g x gasoline + w_d x distillate surprise; `Z = TLS / sigma`,
+  sigma = std dev of the last 12 weekly TLS **excluding the week being traded** (needs >= 8
+  weeks, else Telegram error + exit 1). |Z| < 1.25 -> stand down (inclusive at 1.25).
+  Cushing contradicting the headline -> Regime 2, the fade (direction opposite the
+  headline, checked first). Regime 3 = EIA draw beat consensus but fell short of an extreme
+  (> 3.0 mb) API draw -> PUT; its overnight-rally condition (> $1.00) is on the checklist,
+  not data. Otherwise Regime 1, with the headline (build -> PUT, draw -> CALL).
+- **Expected move** (`-TLS x beta_vol x Cushing multiplier`, x USD/INR for MCX) is given for
+  Regime 1 only; Regimes 2 and 3 target chart levels. `sanity_ok` says whether it sits in
+  the 0.15-0.30 USD per mb anchor; **at OVX ~54 it does not** (~0.9), and the Telegram
+  message says so. Unknown Cushing level -> multiplier 1.0, `cushing_level_known: false`.
+- **Option:** ITM only. Delta 0.60-0.70, or 0.80-0.85 when OVX is strictly above 35.
+  Expiry = the nearest 19th (`MCX_EXPIRY_DAY`, **an assumption** from README section 13 -
+  confirm on your chain), rolled to next month when 5 or fewer days remain. No option-chain
+  feed exists: the strike is left to you (pick the ITM strike whose delta is in range).
+- **Sizing:** `ACCOUNT_EQUITY_INR` (optional; unset -> `sizing: null`) x 1%, converted through
+  USD/INR and the mid delta, given as lots **per futures stop** ($0.18 / $0.25 / $0.35)
+  because the real stop (1.5 x 1-min ATR or beyond VWAP +/-1.5 sigma) comes from the chart.
+  `MAX_LOTS` caps it (runbook: 1 lot for the first 3 weeks).
+- **Not automated (on `checklist`):** time-spread and dealer-gamma filters, the retest entry,
+  the real stop, FX/RBI and geopolitical aborts, OI pinning haircut. The pre-release
+  `scorecard` is informational: the runbook doesn't say how a miss changes the trade.
+- **Schedule** comes from 10:30 New York time, so it moves with US daylight saving: print
+  20:00 IST in summer, 21:00 in winter; time stop +35 min; hard exit +2.5 h.
+- **The AI boundary:** Groq writes only `analysis`; a stand-down asks it for nothing (a
+  model asked to explain noise invents a direction). It never touches the trade
+  (a test proves a lying model changes nothing); any failure -> `analysis: ""`,
+  `model_used: "rule_based"`.
+- **Input rules unchanged:** consensus and EIA actuals must share `release_date`; the API
+  report is the Tuesday before (0-3 days earlier); files older than 2 days (API 5, market
+  data by `fetched_at`) are refused unless `--allow-stale`. All three liquids' consensus and
+  actuals plus `api_crude_mb` are mandatory; Cushing, Cushing level and refinery are optional.
+  After writing, the engine appends the week to the surprise history (idempotent).
+- **Live finding (2026-09-30):** the history's 12-08-2026 week has a +19.9 mb TLS, so sigma
+  is ~8.3 mb (4.9 without it) and a trade needs |TLS| above ~6-10 mb. The 23-09 reference week
+  (TLS +2.23, Z +0.27) therefore **stands down**. That is what the runbook's rolling std dev
+  does with a wild week in the window; it rolls out after 12 weeks.
+- **api_monitor replay limit:** replaying an old API report (`--date`) is rejected once TE's
+  "Related" snapshot has moved on to a newer release; the sim reuses the earlier
+  `api_report.json`.
+- **USD/INR** comes from `yfinance` (`INR=X`, 10 s timeout) or the fallback 84.0; a quote
+  outside 50-150 is treated as bad data.
+- **Groq caveats:** the spec's default model `llama-3.3-70b-versatile` is 404 for this
+  account; `qwen/qwen3.8-27b` works (set `GROQ_MODEL`); `openai/gpt-oss-*` are reasoning
+  models that spend `max_tokens=150` on hidden reasoning and return empty content. Replies
+  are 3 sentences (~230-300 chars), capped at `ANALYSIS_MAX_CHARS` = 450 and trimmed to a
+  complete sentence (`complete_sentences`). The model invents figures and can get the
+  direction wrong: display-only, never trust it.
+- `load_inputs(data_dir=None)` resolves `DATA_DIR` at call time; an import-time default
+  silently ignores test patching and reads the real `data/`.
 
 ### `app/telegram_bot.py` — the success alert
 
-Sends `data/signal.json` to Telegram (`format_signal` is pure and tested): grade, direction,
-crude deviation with actual vs consensus, Cushing / API status, the "products strongly
-oppose" flag when true, the trade (option, strike, size, confidence), the expected WTI move
-with its MCX/INR equivalent, and the narrative. A skip week sends "NO TRADE" and none of the
-trade detail; missing optional data reads `N/A`, not a crash. Runs after `signal_engine`.
+Sends `data/signal.json` (`format_signal` is pure and tested): regime and direction with the
+option, TLS / Z / sigma, the three surprises, Cushing (change, level, multiplier), API
+alignment, delta and expiry, expected move (and a warning when outside the sanity band),
+lots per futures stop (or how to enable sizing), the IST clock, the checklist and the
+narrative. A stand-down sends only the TLS/Z line, the surprises and "No position this
+week."; missing optional data reads `N/A`/`unknown`, not a crash. Runs after `signal_engine`.
 
 - **It refuses a stale signal.** If the engine failed, `signal.json` still holds LAST week's
   trade; sending it as live could get someone to trade a dead setup. A signal older than 2
   days -> error alert + exit 1. `--allow-stale` sends it anyway, first line
   `REPLAY - data is N days old, NOT a live signal`. Missing/corrupt file -> error alert too.
-- Verified live: Telegram accepted a test alert and a replay of the 23-09 signal (607 chars).
-- The narrative arrives as complete sentences (engine cap 450 chars, trimmed at a sentence
-  end); an earlier 200-char cap showed it cut mid-word in the message.
 - Windows consoles are cp1252: never `print()` this text (emoji raise `UnicodeEncodeError`);
   the script only logs, and `setup_logging` forces UTF-8.
 

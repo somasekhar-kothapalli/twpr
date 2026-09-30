@@ -6,58 +6,75 @@ from app import telegram_bot as tb
 from app.signal_engine import build_signal
 from app.utils.common import fmt, now_ist
 
+MARKET = {"atr_20": 4.839, "ovx": 53.74, "cl1_cl2": 2.24, "crack_321": 61.6, "brent_wti": 6.8}
 REFERENCE = {
-    "release_date": "30-09-2026",
-    "crude_consensus_mb": -1.6, "gasoline_consensus_mb": -1.4, "distillate_consensus_mb": -0.7,
-    "crude_change_mb": -0.391, "cushing_change_mb": -0.684, "gasoline_change_mb": 1.269,
-    "distillate_change_mb": 2.087, "refinery_util_change_pct": -2.8,
-    "api_crude_mb": 1.25, "api_cushing_mb": -0.684,
+    "release_date": "23-09-2026",
+    "crude_consensus_mb": -0.6, "gasoline_consensus_mb": 0.1, "distillate_consensus_mb": -0.6,
+    "crude_change_mb": 2.969, "cushing_change_mb": 2.266, "cushing_level_mb": 23.748,
+    "gasoline_change_mb": -1.686, "distillate_change_mb": -0.428, "refinery_util_change_pct": -2.8,
+    "api_crude_mb": 1.786, "api_cushing_mb": 2.08,
 }
 
 
-def signal(analysis="Crude built more than expected; Cushing draw contradicts.", **overrides):
-    inputs = {**REFERENCE, **overrides}
-    return build_signal(inputs, 84.0, "yfinance", analyse=lambda p: (analysis, "groq/x" if analysis else "rule_based"),
-                        generated_at="30-09-2026 20:05")
+def signal(analysis="Crude built more than expected; Cushing confirms.", sigma=1.5, equity=None, market=None, **overrides):
+    return build_signal({**REFERENCE, **overrides}, market or MARKET, sigma, 84.0, "yfinance", equity, None,
+                        analyse=lambda p: (analysis, "groq/x" if analysis else "rule_based"),
+                        generated_at="23-09-2026 20:02")
 
 
-def test_bearish_grade_b_message_has_everything_needed_to_act():
-    text = tb.format_signal(signal())
-    assert text.splitlines()[0] == "\U0001F534 TWPR SIGNAL - Grade B Bearish"
+def test_regime_1_message_has_everything_needed_to_act():
+    text = tb.format_signal(signal(equity=1_000_000.0))
+    assert text.splitlines()[0] == "🔴 TWPR SIGNAL - Regime 1 Bearish: PUT ITM"
     for expected in (
-        "Release 30-09-2026 (generated 30-09-2026 20:05 IST)",
-        "Crude deviation: +1.209 mb (actual -0.391 mb vs consensus -1.600 mb)",
-        "Cushing: -0.684 mb (contradicts)",
-        "API crude: +1.250 mb (aligns)",
-        "Products strongly oppose: gasoline +2.669 mb, distillate +2.787 mb",
-        "Trade: PUT 1-OTM | size 1.5% of capital",
-        "Confidence: 55",
-        "Expected WTI move: -0.8 to -1.5 USD = -67 to -126 INR on MCX (USD/INR 84.00, yfinance)",
-        "Crude built more than expected; Cushing draw contradicts.",
+        "Release 23-09-2026 (generated 23-09-2026 20:02 IST)",
+        "TLS +2.226 mb | Z +1.48 (sigma 1.500)",
+        "Surprises: crude +3.569 | gasoline -1.786 | distillate +0.172",
+        "Cushing: +2.266 mb (confirms), level 23.7 mb, x1.39",
+        "API crude: +1.786 mb (aligns)",
+        "Option: delta 0.80-0.85 (OVX 53.7 above 35, deep ITM) | expiry 19-10-2026 (26d)",
+        "Expected WTI move: -2.01 USD = -168 INR on MCX (USD/INR 84.00, yfinance)",
+        "outside the 0.15-0.30 USD/mb anchor",
+        "Risk 1% = INR 10,000 | lots by futures stop:",
+        "$0.18: 8 | $0.25: 5 | $0.35: 4",
+        "IST: print 20:00 | time stop 20:35 | hard exit 22:30 | chop exit 4 min",
+        "Checklist:",
+        "- Limit orders only on the option chain",
+        "Crude built more than expected; Cushing confirms.",
     ):
         assert expected in text, expected
-    assert "REPLAY" not in text
+    assert "REPLAY" not in text and len(text) < 4096
 
 
-def test_bullish_grade_a_message():
-    text = tb.format_signal(signal(crude_change_mb=-3.5, cushing_change_mb=-1.0, api_crude_mb=-1.0))
-    assert text.splitlines()[0] == "\U0001F7E2 TWPR SIGNAL - Grade A Bullish"
-    assert "Trade: CALL ATM | size 2.0% of capital" in text
-    assert "Cushing: -1.000 mb (confirms)" in text and "Expected WTI move: +1.5 to +3.0 USD" in text
+def test_bullish_message_and_calm_market_without_deepening():
+    text = tb.format_signal(signal(market={**MARKET, "ovx": 30.0, "atr_20": 2.0}, crude_change_mb=-4.0,
+                                   gasoline_change_mb=-1.0, distillate_change_mb=-1.0, cushing_change_mb=-1.0,
+                                   api_crude_mb=-1.0))
+    assert text.splitlines()[0] == "🟢 TWPR SIGNAL - Regime 1 Bullish: CALL ITM"
+    assert "Option: delta 0.60-0.70 |" in text and "deep ITM" not in text and "anchor" not in text
 
 
-def test_skip_week_says_no_trade_and_shows_no_trade_details():
-    text = tb.format_signal(signal(analysis="", crude_change_mb=-1.2))
-    assert text.splitlines()[0] == "⚪ TWPR - NO TRADE"
-    assert "Crude deviation: +0.400 mb (inside the ±1.0 skip zone)" in text and "No position this week." in text
-    for absent in ("Trade:", "Confidence", "Expected WTI", "Cushing"):
+def test_regime_2_says_targets_are_chart_levels():
+    text = tb.format_signal(signal(cushing_change_mb=-0.5, cushing_level_mb=40.0))
+    assert text.splitlines()[0] == "🟢 TWPR SIGNAL - Regime 2 Bullish: CALL ITM"
+    assert "Cushing: -0.500 mb (contradicts)" in text and "Targets: chart levels" in text and "Expected WTI move" not in text
+
+
+def test_missing_equity_says_how_to_get_lot_sizing():
+    assert "set ACCOUNT_EQUITY_INR in .env" in tb.format_signal(signal())
+
+
+def test_unknown_cushing_reads_unknown_not_a_crash():
+    text = tb.format_signal(signal(cushing_change_mb=None, cushing_level_mb=None))
+    assert "Cushing: N/A (unknown), level unknown" in text
+
+
+def test_stand_down_says_no_trade_and_shows_no_trade_details():
+    text = tb.format_signal(signal(analysis="", sigma=5.0))
+    assert text.splitlines()[0] == "⚪ TWPR - STAND DOWN"
+    assert "TLS +2.226 mb, Z +0.45 (sigma 5.000): inside the 1.25 sigma noise band." in text
+    assert "No position this week." in text
+    for absent in ("Option:", "Checklist", "Expected WTI", "Cushing", "Risk 1%"):
         assert absent not in text
-
-
-def test_missing_optional_data_reads_na_not_a_crash():
-    text = tb.format_signal(signal(cushing_change_mb=None, gasoline_change_mb=None))
-    assert "Cushing: N/A (unknown)" in text
-    assert "Products strongly oppose" not in text     # insufficient data: flag omitted, not asserted
 
 
 def test_no_narrative_means_no_empty_trailing_block():
@@ -65,8 +82,8 @@ def test_no_narrative_means_no_empty_trailing_block():
 
 
 def test_replay_is_stamped_and_fits_telegrams_limit():
-    text = tb.format_signal(signal(), replay_days=7)
-    assert text.splitlines()[0] == "\U0001F501 REPLAY - data is 7 days old, NOT a live signal"
+    text = tb.format_signal(signal(equity=1_000_000.0), replay_days=7)
+    assert text.splitlines()[0] == "🔁 REPLAY - data is 7 days old, NOT a live signal"
     assert len(text) < 4096
 
 

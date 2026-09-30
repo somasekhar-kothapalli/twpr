@@ -5,180 +5,154 @@ import types
 
 import pytest
 
+from app import model
 from app import signal_engine as se
-from app.signal_engine import (InputError, apply_cushing_adjustment, apply_grade_logic, build_signal,
-                               calculate_confidence, calculate_deviations, check_api_alignment, check_products,
-                               fetch_usd_inr, generate_analysis, get_expected_move, get_trade_recommendation,
-                               load_inputs)
+from app.signal_engine import (InputError, build_signal, fetch_usd_inr, generate_analysis, load_equity, load_inputs,
+                               load_market, load_sigma)
 
-# The Sep 4 2026 reference week (data/reference_week.json in the old pipeline).
-REFERENCE = {
-    "release_date": "30-09-2026",
-    "crude_consensus_mb": -1.6, "gasoline_consensus_mb": -1.4, "distillate_consensus_mb": -0.7,
-    "crude_change_mb": -0.391, "cushing_change_mb": -0.684, "gasoline_change_mb": 1.269,
-    "distillate_change_mb": 2.087, "refinery_util_change_pct": -2.8,
-    "api_crude_mb": 1.25, "api_cushing_mb": -0.684,
+# The 23-09-2026 report: crude +3.569 vs consensus, Cushing +2.266 at a 23.748 mb level, OVX 53.7.
+INPUTS = {
+    "release_date": "23-09-2026",
+    "crude_consensus_mb": -0.6, "gasoline_consensus_mb": 0.1, "distillate_consensus_mb": -0.6,
+    "crude_change_mb": 2.969, "cushing_change_mb": 2.266, "cushing_level_mb": 23.748,
+    "gasoline_change_mb": -1.686, "distillate_change_mb": -0.428, "refinery_util_change_pct": -2.8,
+    "api_crude_mb": 1.786, "api_cushing_mb": 2.08,
 }
+MARKET = {"atr_20": 4.839, "ovx": 53.74, "cl1_cl2": 2.24, "crack_321": 61.6, "brent_wti": 6.8, "dxy": 101.3,
+          "wti": 89.7, "as_of": "22-09-2026", "fetched_at": "23-09-2026 18:00"}
+SIGMA = 1.5          # TLS 2.226 -> Z 1.48, past the 1.25 gate
+TODAY = datetime.date(2026, 9, 23)
 
 
-# ------------------------------------------------------------------ pure rules
-
-def test_deviations_round_to_3dp_and_product_none_propagates():
-    d = calculate_deviations(-0.391, -1.6, 1.269, -1.4, 2.087, -0.7)
-    assert d == {"crude_deviation_mb": 1.209, "gasoline_deviation_mb": 2.669, "distillate_deviation_mb": 2.787}
-    d = calculate_deviations(-0.391, -1.6, None, -1.4, 2.087, None)
-    assert d["gasoline_deviation_mb"] is None and d["distillate_deviation_mb"] is None
+def stub(text="analysis", name="groq/test"):
+    return lambda prompt: (text, name)
 
 
-@pytest.mark.parametrize("deviation,expected", [
-    (0.0, ("skip", "neutral")), (1.0, ("skip", "neutral")), (-1.0, ("skip", "neutral")),   # inclusive skip zone
-    (1.001, ("B", "bearish")), (-1.001, ("B", "bullish")),
-    (1.499, ("B", "bearish")), (1.5, ("A", "bearish")),                                     # inclusive Grade A
-    (-1.499, ("B", "bullish")), (-1.5, ("A", "bullish")), (3.569, ("A", "bearish")),
-])
-def test_grade_logic_boundaries(deviation, expected):
-    assert apply_grade_logic(deviation) == expected
+def signal(sigma=SIGMA, market=None, equity=None, max_lots=None, analyse=None, **overrides):
+    return build_signal({**INPUTS, **overrides}, market or MARKET, sigma, 84.0, "fallback", equity, max_lots,
+                        analyse=analyse or stub(), generated_at="23-09-2026 20:02")
 
 
-@pytest.mark.parametrize("grade,direction,cushing,expected", [
-    ("A", "bullish", 0.5, ("B", True)),     # a build contradicts bullish -> downgrade
-    ("A", "bearish", -0.5, ("B", True)),    # a draw contradicts bearish -> downgrade
-    ("A", "bullish", -0.5, ("A", False)),
-    ("A", "bearish", 0.5, ("A", False)),
-    ("B", "bullish", 0.5, ("B", True)),     # B is the floor
-    ("A", "bullish", 0.0, ("A", False)),    # exactly 0.0 contradicts nothing
-    ("A", "bearish", None, ("A", None)),    # missing -> no adjustment
-    ("skip", "neutral", 1.0, ("skip", None)),
-])
-def test_cushing_adjustment(grade, direction, cushing, expected):
-    assert apply_cushing_adjustment(grade, direction, cushing) == expected
+# ------------------------------------------------------------------ the decision
+
+def test_reference_week_is_regime_1_bearish_put_with_deep_itm_delta():
+    s = signal()
+    c, t = s["calculations"], s["signal"]
+    assert c["tls_mb"] == pytest.approx(3.569 - 0.80 * 1.786 + 0.50 * 0.172, abs=1e-3)
+    assert c["z_tls"] == pytest.approx(1.48, abs=0.01) and c["api_aligns"] is True
+    assert (t["action"], t["regime"], t["direction"], t["option_type"], t["strike_type"]) \
+        == ("trade", 1, "bearish", "PUT", "ITM")
+    assert c["cushing_contradicts"] is False and c["cushing_multiplier"] == pytest.approx(1.391, abs=1e-3)
+    assert s["option"]["ovx_deepened"] is True and (s["option"]["delta_low"], s["option"]["delta_high"]) == (0.80, 0.85)
+    assert (s["option"]["expiry_date"], s["option"]["days_to_expiry"], s["option"]["rolled"]) == ("19-10-2026", 26, False)
+    assert s["schedule"]["release_ist"] == "20:00" and s["schedule"]["hard_exit_ist"] == "22:30"
 
 
-@pytest.mark.parametrize("direction,gas,dist,expected", [
-    ("bearish", 2.669, 2.787, True),        # the reference week: same-sign surprise
-    ("bearish", 2.001, 2.001, True),
-    ("bearish", 2.0, 2.787, False),         # strictly greater than 2.0
-    ("bearish", 2.669, 1.9, False),         # BOTH must exceed
-    ("bearish", -2.5, -2.5, False),         # opposite sign does not count
-    ("bullish", -2.5, -3.0, True),
-    ("bullish", 2.5, 2.5, False),
-    ("bearish", None, 2.787, None), ("bullish", -3.0, None, None), ("neutral", 5.0, 5.0, None),
-])
-def test_products(direction, gas, dist, expected):
-    assert check_products(direction, gas, dist) is expected
+def test_expected_move_is_negative_for_a_build_and_flags_the_sanity_band():
+    move = signal()["expected_move"]
+    assert move["wti_usd"] == pytest.approx(-2.005, abs=0.01) and move["mcx_inr"] == -168   # at 84.0
+    assert move["per_mb_usd"] > 0.30 and move["sanity_ok"] is False        # OVX 54 pushes it past 0.15-0.30
+    calm = signal(market={**MARKET, "ovx": 30.0, "atr_20": 2.0})
+    assert calm["expected_move"]["sanity_ok"] is True and calm["option"]["ovx_deepened"] is False
 
 
-@pytest.mark.parametrize("direction,api,expected", [
-    ("bullish", -0.5, True), ("bullish", 0.5, False), ("bearish", 0.5, True), ("bearish", -0.5, False),
-    ("bullish", 0.0, False), ("bearish", 0.0, False),
-])
-def test_api_alignment(direction, api, expected):
-    assert check_api_alignment(direction, api) is expected
+def test_small_surprise_relative_to_sigma_stands_down_with_no_trade_detail():
+    s = signal(sigma=5.0)
+    assert s["signal"] == {"action": "stand_down", "regime": None, "direction": "neutral",
+                           "option_type": "NONE", "strike_type": "NONE"}
+    assert s["expected_move"] is s["option"] is s["sizing"] is None and s["checklist"] == []
+    assert (s["analysis"], s["model_used"]) == ("", "rule_based")      # no narrative is asked for on a stand-down
 
 
-@pytest.mark.parametrize("grade,cushing,api,expected", [
-    ("skip", None, False, 0),
-    ("A", False, True, 85), ("A", True, True, 75), ("A", False, False, 75), ("A", True, False, 65),
-    ("B", False, True, 65), ("B", True, True, 55), ("B", True, False, 45),
-    ("B", None, True, 60), ("B", None, False, 50),          # missing Cushing: no adjustment
-])
-def test_confidence(grade, cushing, api, expected):
-    assert calculate_confidence(grade, cushing, api) == expected
+def test_cushing_contradiction_routes_to_regime_2_and_fades_the_headline():
+    s = signal(cushing_change_mb=-0.5, cushing_level_mb=40.0)
+    assert (s["signal"]["regime"], s["signal"]["direction"], s["signal"]["option_type"]) == (2, "bullish", "CALL")
+    assert s["calculations"]["cushing_contradicts"] is True
+    assert s["expected_move"] is None                      # targets are chart levels
+    assert any("FADE" in line for line in s["checklist"])
 
 
-def test_confidence_is_clamped(monkeypatch):
-    monkeypatch.setattr(se, "CONFIDENCE_MAX", 80)
-    assert calculate_confidence("A", False, True) == 80
-    monkeypatch.setattr(se, "CONFIDENCE_MIN", 50)
-    assert calculate_confidence("B", True, False) == 50
+def test_bullish_regime_1_call_with_a_positive_expected_move():
+    s = signal(crude_change_mb=-4.0, gasoline_change_mb=-1.0, distillate_change_mb=-1.0,
+               cushing_change_mb=-1.0, api_crude_mb=-1.0)
+    assert (s["signal"]["regime"], s["signal"]["option_type"]) == (1, "CALL")
+    assert s["expected_move"]["wti_usd"] > 0 and s["expected_move"]["mcx_inr"] > 0
+    assert any("CL1-CL2 to widen" in line for line in s["checklist"])
 
 
-def test_trade_recommendation():
-    assert get_trade_recommendation("A", "bullish") == {"option_type": "CALL", "strike_type": "ATM", "size_pct": 2.0}
-    assert get_trade_recommendation("A", "bearish") == {"option_type": "PUT", "strike_type": "ATM", "size_pct": 2.0}
-    assert get_trade_recommendation("B", "bearish") == {"option_type": "PUT", "strike_type": "1-OTM", "size_pct": 1.5}
-    assert get_trade_recommendation("skip", "neutral") == {"option_type": "NONE", "strike_type": "NONE", "size_pct": 0.0}
+def test_regime_3_sell_the_fact_when_the_eia_draw_falls_short_of_an_extreme_api_draw():
+    s = signal(crude_change_mb=-1.0, gasoline_change_mb=-3.0, distillate_change_mb=-2.0,
+               cushing_change_mb=-1.0, api_crude_mb=-5.0)
+    assert (s["signal"]["regime"], s["signal"]["direction"], s["signal"]["option_type"]) == (3, "bearish", "PUT")
+    assert s["scorecard"]["api_prepositioned"] is True and s["expected_move"] is None
+    assert any("overnight rally" in line for line in s["checklist"])
 
 
-def test_expected_move():
-    assert get_expected_move("B", "bearish", 84.0) == {
-        "wti_low": -0.8, "wti_high": -1.5, "mcx_low": -67, "mcx_high": -126, "usd_inr": 84.0}
-    assert get_expected_move("A", "bullish", 84.0)["mcx_high"] == 252
-    move = get_expected_move("skip", "neutral", 84.0)
-    assert (move["wti_low"], move["mcx_low"], move["mcx_high"]) == (0.0, 0, 0)
+def test_unknown_cushing_data_is_neutral_not_a_route_to_regime_2():
+    s = signal(cushing_change_mb=None, cushing_level_mb=None)
+    c = s["calculations"]
+    assert c["cushing_contradicts"] is None and c["cushing_multiplier"] == 1.0 and c["cushing_level_known"] is False
+    assert s["signal"]["regime"] == 1
 
 
-# -------------------------------------------------------------- assembled signal
-
-def stub(text="analysis", model="groq/test"):
-    return lambda prompt: (text, model)
-
-
-def test_reference_week_end_to_end():
-    signal = build_signal(REFERENCE, 84.0, "yfinance", analyse=stub(), generated_at="30-09-2026 20:05")
-    assert signal["signal"] == {"grade": "B", "direction": "bearish", "confidence": 55,
-                                "option_type": "PUT", "strike_type": "1-OTM", "size_pct": 1.5}
-    assert signal["calculations"] == {
-        "crude_deviation_mb": 1.209, "gasoline_deviation_mb": 2.669, "distillate_deviation_mb": 2.787,
-        "cushing_contradicts": True, "products_oppose": True, "api_aligns": True}
-    assert signal["expected_move"] == {"wti_low": -0.8, "wti_high": -1.5, "mcx_low": -67, "mcx_high": -126,
-                                       "usd_inr": 84.0, "usd_inr_source": "yfinance"}
-    assert signal["release_date"] == "30-09-2026" and signal["generated_at"] == "30-09-2026 20:05"
-    assert list(signal) == ["release_date", "generated_at", "inputs", "calculations", "signal",
-                            "expected_move", "analysis", "model_used"]
-    assert "release_date" not in signal["inputs"] and signal["inputs"]["refinery_util_change_pct"] == -2.8
+def test_scorecard_reads_the_thresholds_and_keeps_unknowns_none():
+    card = signal(market={**MARKET, "cl1_cl2": 0.30, "crack_321": None, "brent_wti": 5.51})["scorecard"]
+    assert card == {"backwardation": False, "crack_321": None, "brent_wti": True, "api_prepositioned": False}
 
 
-def test_skip_week_has_no_trade_and_null_flags():
-    inputs = {**REFERENCE, "crude_change_mb": -1.2}     # deviation +0.4 -> inside the skip zone
-    s = build_signal(inputs, 84.0, "fallback", analyse=stub())
-    assert s["signal"] == {"grade": "skip", "direction": "neutral", "confidence": 0,
-                           "option_type": "NONE", "strike_type": "NONE", "size_pct": 0.0}
-    assert s["calculations"]["cushing_contradicts"] is None and s["calculations"]["api_aligns"] is None
-    assert s["calculations"]["products_oppose"] is None
-    assert (s["expected_move"]["wti_low"], s["expected_move"]["mcx_high"]) == (0.0, 0)
+def test_sizing_uses_the_mid_delta_and_the_lot_cap():
+    s = signal(equity=1_000_000.0)
+    assert s["sizing"]["risk_inr"] == 10_000 and s["sizing"]["delta_used"] == 0.825
+    assert s["sizing"]["lots_by_futures_stop_usd"] == {"0.18": 8, "0.25": 5, "0.35": 4}     # at USD/INR 84
+    capped = signal(equity=1_000_000.0, max_lots=1)["sizing"]
+    assert set(capped["lots_by_futures_stop_usd"].values()) == {1} and capped["max_lots"] == 1
+    assert signal()["sizing"] is None
 
 
-def test_grade_a_downgraded_by_cushing_uses_the_downgraded_grade_for_everything():
-    inputs = {**REFERENCE, "crude_change_mb": 2.0}      # deviation +3.6 -> A bearish; cushing draw contradicts
-    s = build_signal(inputs, 84.0, "fallback", analyse=stub())
-    assert s["signal"]["grade"] == "B" and s["signal"]["confidence"] == 55
-    assert (s["signal"]["strike_type"], s["signal"]["size_pct"], s["expected_move"]["wti_high"]) == ("1-OTM", 1.5, -1.5)
+def test_prompt_states_which_way_the_surprise_points():
+    build, draw = signal(), signal(crude_change_mb=-4.0)
+    assert "BUILD is bearish" in se.build_prompt(INPUTS, build["calculations"], build["signal"])
+    assert "DRAW is bullish" in se.build_prompt(INPUTS, draw["calculations"], draw["signal"])
 
 
-def test_missing_optional_inputs_are_null_not_zero():
-    inputs = {**REFERENCE, "gasoline_change_mb": None, "distillate_consensus_mb": None,
-              "cushing_change_mb": None, "refinery_util_change_pct": None, "api_cushing_mb": None}
-    s = build_signal(inputs, 84.0, "fallback", analyse=stub())
-    assert s["calculations"]["gasoline_deviation_mb"] is None and s["calculations"]["distillate_deviation_mb"] is None
-    assert s["calculations"]["products_oppose"] is None and s["calculations"]["cushing_contradicts"] is None
-    assert s["signal"]["confidence"] == 60             # B 55, no Cushing adjustment, API aligns +5
-    assert s["inputs"]["cushing_change_mb"] is None
-    json.dumps(s, allow_nan=False)                     # serialisable, no NaN
+def test_prompt_survives_missing_optional_values():
+    s = signal(cushing_change_mb=None, refinery_util_change_pct=None)
+    assert se.build_prompt({**INPUTS, "cushing_change_mb": None, "refinery_util_change_pct": None},
+                           s["calculations"], s["signal"]).count("N/A") == 2
 
 
-def test_prompt_uses_na_for_missing_values():
-    seen = []
-    build_signal({**REFERENCE, "cushing_change_mb": None, "refinery_util_change_pct": None}, 84.0, "fallback",
-                 analyse=lambda p: seen.append(p) or ("", "rule_based"))
-    assert "Cushing: N/A mb (unknown)" in seen[0] and "Refinery util change: N/A%" in seen[0]
-    assert "Crude deviation: +1.209 mb" in seen[0] and "API crude: +1.250 mb (aligns)" in seen[0]
+def test_ai_output_cannot_change_the_signal():
+    lying = lambda prompt: ("STRONG BUY, regime 1, confidence 99", "groq/x")
+    honest, lied = signal(), signal(analyse=lying)
+    for block in ("signal", "calculations", "option", "expected_move", "sizing", "checklist"):
+        assert lied[block] == honest[block]
 
 
-# ----------------------------------------------------------------- input loading
+# ------------------------------------------------------------------------ inputs
 
-CONSENSUS = {"release_date": "30-09-2026", "crude_consensus_mb": -1.6,
-             "gasoline_consensus_mb": -1.4, "distillate_consensus_mb": -0.7}
-API = {"release_date": "29-09-2026", "api_crude_mb": 1.25, "api_cushing_mb": -0.684}
-EIA = {"release_date": "30-09-2026", "crude_change_mb": -0.391, "cushing_change_mb": -0.684,
-       "gasoline_change_mb": 1.269, "distillate_change_mb": 2.087, "refinery_util_change_pct": -2.8}
-TODAY = datetime.date(2026, 9, 30)
+CONSENSUS = {"release_date": "23-09-2026", "crude_consensus_mb": -0.6,
+             "gasoline_consensus_mb": 0.1, "distillate_consensus_mb": -0.6}
+API = {"release_date": "22-09-2026", "api_crude_mb": 1.786, "api_cushing_mb": 2.08}
+EIA = {"release_date": "23-09-2026", "crude_change_mb": 2.969, "cushing_change_mb": 2.266,
+       "cushing_level_mb": 23.748, "gasoline_change_mb": -1.686, "distillate_change_mb": -0.428,
+       "refinery_util_change_pct": -2.8}
 
 
-def write(tmp_path, consensus=None, api=None, eia=None):
+def history(weeks=10):
+    """Weekly rows before 23-09-2026 with a spread of surprises."""
+    start = datetime.date(2026, 7, 8)
+    crude = [1.0, -2.0, 3.0, -1.0, 2.0, -3.0, 1.5, -0.5, 2.5, -1.5, 0.5, 1.0]
+    return [{"release_date": (start + datetime.timedelta(weeks=i)).strftime("%d-%m-%Y"),
+             "crude_surprise_mb": crude[i], "gasoline_surprise_mb": 0.0, "distillate_surprise_mb": 0.0}
+            for i in range(weeks)]
+
+
+def write(tmp_path, consensus=None, api=None, eia=None, market=None, rows=None):
     files = {"consensus.json": CONSENSUS if consensus is None else consensus,
              "api_report.json": API if api is None else api,
-             "eia_actuals.json": EIA if eia is None else eia}
+             "eia_actuals.json": EIA if eia is None else eia,
+             "market.json": MARKET if market is None else market,
+             "surprise_history.json": history() if rows is None else rows}
     for name, content in files.items():
         (tmp_path / name).write_text(content if isinstance(content, str) else json.dumps(content), encoding="utf-8")
     return tmp_path
@@ -186,15 +160,15 @@ def write(tmp_path, consensus=None, api=None, eia=None):
 
 def test_load_inputs_happy_path_and_api_release_is_the_day_before(tmp_path):
     inputs = load_inputs(write(tmp_path), TODAY)
-    assert inputs["release_date"] == "30-09-2026" and inputs["crude_change_mb"] == -0.391
-    assert inputs["api_crude_mb"] == 1.25 and inputs["refinery_util_change_pct"] == -2.8
+    assert inputs["release_date"] == "23-09-2026" and inputs["crude_change_mb"] == 2.969
+    assert inputs["api_crude_mb"] == 1.786 and inputs["cushing_level_mb"] == 23.748
 
 
 @pytest.mark.parametrize("which,content,title", [
     ("consensus", "{not json", "Invalid JSON"),
     ("api", "[1, 2]", "Invalid JSON"),
     ("eia", {"crude_change_mb": 1}, "release_date missing"),
-    ("eia", {"release_date": "2026-09-30", "crude_change_mb": 1}, "release_date invalid"),
+    ("eia", {"release_date": "2026-09-23", "crude_change_mb": 1}, "release_date invalid"),
 ])
 def test_load_inputs_rejects_bad_files(tmp_path, which, content, title):
     with pytest.raises(InputError) as err:
@@ -215,13 +189,13 @@ def test_load_inputs_stale_and_allow_stale(tmp_path):
     with pytest.raises(InputError) as err:
         load_inputs(tmp_path, datetime.date(2026, 10, 5))
     assert err.value.title == "Stale data"
-    assert load_inputs(tmp_path, datetime.date(2026, 10, 5), allow_stale=True)["release_date"] == "30-09-2026"
+    assert load_inputs(tmp_path, datetime.date(2026, 10, 5), allow_stale=True)["release_date"] == "23-09-2026"
 
 
 @pytest.mark.parametrize("which,content", [
-    ("consensus", {"release_date": "23-09-2026", "crude_consensus_mb": -1.6}),   # last week's consensus
-    ("api", {"release_date": "22-09-2026", "api_crude_mb": 1.25}),               # last week's API report
-    ("api", {"release_date": "01-10-2026", "api_crude_mb": 1.25}),               # API AFTER the EIA release
+    ("consensus", {"release_date": "16-09-2026", "crude_consensus_mb": -1.6}),   # last week's consensus
+    ("api", {"release_date": "15-09-2026", "api_crude_mb": 1.25}),               # last week's API report
+    ("api", {"release_date": "24-09-2026", "api_crude_mb": 1.25}),               # API AFTER the EIA release
 ])
 def test_release_date_cross_validation(tmp_path, which, content):
     with pytest.raises(InputError) as err:
@@ -229,24 +203,64 @@ def test_release_date_cross_validation(tmp_path, which, content):
     assert err.value.title == "Release date mismatch"
 
 
-@pytest.mark.parametrize("which,content,field", [
-    ("consensus", {"release_date": "30-09-2026", "crude_consensus_mb": None}, "crude_consensus_mb"),
-    ("eia", {"release_date": "30-09-2026"}, "crude_change_mb"),
-    ("api", {"release_date": "29-09-2026", "api_crude_mb": None}, "api_crude_mb"),
+@pytest.mark.parametrize("which,field", [
+    ("consensus", "gasoline_consensus_mb"), ("consensus", "distillate_consensus_mb"),
+    ("eia", "crude_change_mb"), ("eia", "gasoline_change_mb"), ("eia", "distillate_change_mb"),
+    ("api", "api_crude_mb"),
 ])
-def test_mandatory_fields(tmp_path, which, content, field):
+def test_all_three_liquids_and_the_api_crude_are_mandatory(tmp_path, which, field):
+    base = {"consensus": CONSENSUS, "eia": EIA, "api": API}[which]
     with pytest.raises(InputError, match=field) as err:
-        load_inputs(write(tmp_path, **{which: content}), TODAY)
+        load_inputs(write(tmp_path, **{which: {**base, field: None}}), TODAY)
     assert err.value.title == "Mandatory field missing"
 
 
-def test_optional_fields_may_be_missing(tmp_path):
-    bare = write(tmp_path, consensus={"release_date": "30-09-2026", "crude_consensus_mb": -1.6},
-                 eia={"release_date": "30-09-2026", "crude_change_mb": -0.391},
-                 api={"release_date": "29-09-2026", "api_crude_mb": 1.25})
-    inputs = load_inputs(bare, TODAY)
-    assert inputs["gasoline_consensus_mb"] is None and inputs["cushing_change_mb"] is None
-    assert inputs["api_cushing_mb"] is None and inputs["refinery_util_change_pct"] is None
+def test_cushing_and_refinery_are_optional(tmp_path):
+    bare = {k: v for k, v in EIA.items() if k not in ("cushing_change_mb", "cushing_level_mb", "refinery_util_change_pct")}
+    inputs = load_inputs(write(tmp_path, eia=bare), TODAY)
+    assert inputs["cushing_change_mb"] is None and inputs["cushing_level_mb"] is None
+    assert inputs["refinery_util_change_pct"] is None
+
+
+def test_load_market_requires_atr_and_ovx_and_fresh_data(tmp_path):
+    write(tmp_path)
+    assert load_market(tmp_path, TODAY)["ovx"] == 53.74
+    with pytest.raises(InputError, match="Stale") as err:
+        load_market(tmp_path, datetime.date(2026, 10, 5))
+    assert err.value.title == "Stale data"
+    assert load_market(tmp_path, datetime.date(2026, 10, 5), allow_stale=True)["atr_20"] == 4.839
+    write(tmp_path, market={**MARKET, "ovx": None})
+    with pytest.raises(InputError, match="ovx") as err:
+        load_market(tmp_path, TODAY)
+    assert err.value.title == "Mandatory field missing"
+
+
+def test_sigma_excludes_the_week_being_traded_and_refuses_a_short_history(tmp_path):
+    rows = history(10)
+    write(tmp_path, rows=rows)
+    sigma, weeks = load_sigma("23-09-2026", tmp_path)
+    assert weeks == 10 and sigma == pytest.approx(model.sigma_forecast(rows))
+    same = load_sigma(rows[-1]["release_date"], tmp_path)          # the traded week is left out
+    assert same[1] == 9
+    write(tmp_path, rows=history(5))
+    with pytest.raises(InputError, match="needs 8 weeks") as err:
+        load_sigma("23-09-2026", tmp_path)
+    assert err.value.title == "Not enough surprise history"
+
+
+def test_account_settings_are_optional_but_never_silently_wrong(monkeypatch):
+    monkeypatch.delenv("ACCOUNT_EQUITY_INR", raising=False)
+    monkeypatch.delenv("MAX_LOTS", raising=False)
+    assert load_equity() == (None, None)
+    monkeypatch.setenv("ACCOUNT_EQUITY_INR", "1,000,000")
+    monkeypatch.setenv("MAX_LOTS", "1")
+    assert load_equity() == (1_000_000.0, 1)
+    monkeypatch.setenv("ACCOUNT_EQUITY_INR", "# your capital in INR")      # dotenv placeholder = unset
+    assert load_equity()[0] is None
+    for bad in ("ten lakh", "-5", "0"):
+        monkeypatch.setenv("ACCOUNT_EQUITY_INR", bad)
+        with pytest.raises(InputError, match="ACCOUNT_EQUITY_INR"):
+            load_equity()
 
 
 # ----------------------------------------------------- external calls (all stubbed)
@@ -357,47 +371,54 @@ def test_groq_failure_or_missing_key_never_blocks(monkeypatch):
     assert generate_analysis("p") == ("", "rule_based")
 
 
-def test_ai_output_cannot_change_the_signal():
-    lying = lambda prompt: ("STRONG BUY, grade A, confidence 99", "groq/x")
-    honest = build_signal(REFERENCE, 84.0, "fallback", analyse=stub(), generated_at="t")
-    lied = build_signal(REFERENCE, 84.0, "fallback", analyse=lying, generated_at="t")
-    assert lied["signal"] == honest["signal"] and lied["calculations"] == honest["calculations"]
-
 
 # -------------------------------------------------------------------------- main
 
 def patch_main(monkeypatch, tmp_path):
     for const, name in (("CONSENSUS_FILE", "consensus.json"), ("API_REPORT_FILE", "api_report.json"),
-                        ("EIA_ACTUALS_FILE", "eia_actuals.json"), ("SIGNAL_FILE", "signal.json")):
+                        ("EIA_ACTUALS_FILE", "eia_actuals.json"), ("MARKET_FILE", "market.json"),
+                        ("SURPRISE_HISTORY_FILE", "surprise_history.json"), ("SIGNAL_FILE", "signal.json")):
         monkeypatch.setattr(se, const, tmp_path / name)
     monkeypatch.setattr(se, "DATA_DIR", tmp_path)
     monkeypatch.setattr(se, "load_dotenv", lambda *a, **k: None)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("ACCOUNT_EQUITY_INR", raising=False)
+    monkeypatch.delenv("MAX_LOTS", raising=False)
     fake_yfinance(monkeypatch, price=84.0)
-    alerts = []
+    alerts, recorded = [], []
     monkeypatch.setattr(se, "send_error", lambda script, msg: alerts.append((script, msg)))
-    return alerts
+    monkeypatch.setattr(se, "record_week", lambda consensus, actuals: recorded.append(actuals["release_date"]))
+    return alerts, recorded
 
 
-def test_main_writes_signal_json_and_sends_nothing_on_success(monkeypatch, tmp_path):
-    alerts = patch_main(monkeypatch, tmp_path)
+def test_main_writes_signal_json_records_the_week_and_sends_nothing(monkeypatch, tmp_path):
+    alerts, recorded = patch_main(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACCOUNT_EQUITY_INR", "1000000")
     write(tmp_path)
     assert se.main(["--allow-stale"]) == 0
     saved = json.loads((tmp_path / "signal.json").read_text(encoding="utf-8"))
-    assert saved["signal"]["grade"] == "B" and saved["model_used"] == "rule_based" and saved["analysis"] == ""
-    assert alerts == []
+    assert saved["signal"]["action"] in ("trade", "stand_down") and saved["model_used"] == "rule_based"
+    assert saved["sizing"] is not None or saved["signal"]["action"] == "stand_down"
+    assert alerts == [] and recorded == ["23-09-2026"]
 
 
-def test_main_input_error_alerts_telegram_and_writes_nothing(monkeypatch, tmp_path):
-    alerts = patch_main(monkeypatch, tmp_path)
-    write(tmp_path, eia={"release_date": "30-09-2026"})
+def test_main_input_error_alerts_telegram_writes_nothing_and_records_nothing(monkeypatch, tmp_path):
+    alerts, recorded = patch_main(monkeypatch, tmp_path)
+    write(tmp_path, eia={"release_date": "23-09-2026"})
     assert se.main(["--allow-stale"]) == 1
-    assert not (tmp_path / "signal.json").exists()
+    assert not (tmp_path / "signal.json").exists() and recorded == []
     assert alerts and "Mandatory field missing" in alerts[0][1] and "crude_change_mb" in alerts[0][1]
 
 
+def test_main_without_enough_history_alerts_instead_of_guessing_sigma(monkeypatch, tmp_path):
+    alerts, _ = patch_main(monkeypatch, tmp_path)
+    write(tmp_path, rows=history(3))
+    assert se.main(["--allow-stale"]) == 1
+    assert not (tmp_path / "signal.json").exists() and "Not enough surprise history" in alerts[0][1]
+
+
 def test_main_unexpected_error_alerts_telegram(monkeypatch, tmp_path):
-    alerts = patch_main(monkeypatch, tmp_path)
+    alerts, _ = patch_main(monkeypatch, tmp_path)
     write(tmp_path)
     monkeypatch.setattr(se, "build_signal", lambda *a, **k: 1 / 0)
     assert se.main(["--allow-stale"]) == 1
