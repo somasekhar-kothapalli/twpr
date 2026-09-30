@@ -72,6 +72,10 @@ ALWAYS_CHECK = [
     "The lot table assumes the option loses delta x the futures stop. It ignores the IV crush after the "
     "print (vega): size below the table until you have measured real fills.",
 ]
+ATR_STOP_MULTIPLE = 1.5        # runbook stop: 1.5 x the 1-minute ATR
+DEEP_STRIKE_CHECK = ("Deep-ITM strike (delta 0.80-0.85): the books there can be thin. If its bid/ask spread is "
+                     "wide, step down to the 0.65-0.70 delta strike rather than paying it; the journal slippage "
+                     "will show what 'wide' costs.")
 TIME_SPREAD_CHECK = ("Bullish only: a flat-price rally of $0.40 or more needs CL1-CL2 to widen $0.02-$0.04, "
                      "otherwise reject the long.")
 REGIME_CHECK = {
@@ -253,6 +257,17 @@ def sigma_method():
     return method
 
 
+def load_center(release_date, data_dir=None):
+    """The median weekly TLS of the last 12 weeks (excluding the week traded), or None if there is too little
+    history. Informational: the demeaned Z shown beside the raw one."""
+    data_dir = data_dir or DATA_DIR
+    history = [r for r in load_history(data_dir / SURPRISE_HISTORY_FILE.name) if r["release_date"] != release_date]
+    try:
+        return model.tls_center(history)
+    except ValueError:
+        return None
+
+
 def load_sigma(release_date, data_dir=None, method="mad"):
     """(sigma_forecast, weeks used) from the surprise history, excluding the week being traded."""
     data_dir = data_dir or DATA_DIR
@@ -387,8 +402,9 @@ def scorecard(market, api_surprise):
 
 
 def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
-                 analyse=generate_analysis, generated_at=None, sigma_method="mad"):
-    """The full signal.json payload from validated inputs, market data and sigma_forecast."""
+                 analyse=generate_analysis, generated_at=None, sigma_method="mad", tls_center=None):
+    """The full signal.json payload from validated inputs, market data and sigma_forecast. `tls_center` (the
+    median recent TLS) only adds the informational demeaned Z."""
     release_day = parse_release_date(inputs["release_date"])
     month = release_day.month
     surprises = {
@@ -418,6 +434,8 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
         "cushing_level_known": inputs["cushing_level_mb"] is not None,
         "api_surprise_mb": api_surprise, "api_aligns": (api_surprise > 0) == (surprises["crude"] > 0),   # API vs EIA crude surprise (both against consensus)
         "beta_vol": round(beta, 3),
+        "tls_center_mb": None if tls_center is None else round(tls_center, 3),
+        "z_tls_demeaned": None if tls_center is None else round((tls - tls_center) / sigma, 2),
     }
     signal = {"action": "trade" if regime else "stand_down", "regime": regime, "direction": direction,
               "option_type": "NONE", "strike_type": "NONE",
@@ -435,7 +453,11 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
                 market["wti"] * usd_inr, market["ovx"], max(option["days_to_expiry"], 1), (low, high),
                 signal["option_type"])
         if lots:   # {contract: lots} for the contracts you configured
-            sizing = options.sizing(lots, usd_inr, (low, high))
+            atr_stop = round(ATR_STOP_MULTIPLE * market["atr_1m"], 2) if market.get("atr_1m") else None
+            wide = atr_stop is not None and atr_stop > max(options.STOP_BRACKET_USD)  # a normal swing beats the bracket
+            sizing = options.sizing(lots, usd_inr, (low, high),
+                                    (*options.STOP_BRACKET_USD, atr_stop) if wide else options.STOP_BRACKET_USD)
+            sizing["atr_1m_stop_usd"] = atr_stop if wide else None
         if regime == 1:   # Regimes 2 and 3 target chart levels, not a modelled move
             usd = model.expected_move_usd(tls, beta, multiplier)
             anchor = model.anchor_move_usd(tls)
@@ -445,6 +467,8 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
                     "anchor_low_inr": int(round(anchor[0] * usd_inr)), "anchor_high_inr": int(round(anchor[1] * usd_inr)),
                     "band": options.band_context(anchor[1] * usd_inr, market["wti"] * usd_inr) if market.get("wti") else None}
         checklist = REGIME_CHECK[regime] + ([TIME_SPREAD_CHECK] if regime == 1 and direction == "bullish" else []) + ALWAYS_CHECK
+        if option["ovx_deepened"]:
+            checklist.append(DEEP_STRIKE_CHECK)
         if option["expiry_source"] != "mcx_calendar":
             checklist.insert(0, f"The expiry date {option['expiry_date']} is a GUESS (that month is not in the MCX "
                              "calendar loaded: the 19th, or the business day before): check it on your chain.")
@@ -501,7 +525,8 @@ def main(argv=None):
         if not lots:
             logger.warning("MCX_CRUDEOIL_LOTS / MCX_CRUDEOILM_LOTS not set - no lot count in the signal")
         usd_inr, source = fetch_usd_inr()
-        signal = build_signal(inputs, market, sigma, usd_inr, source, lots=lots or None, sigma_method=method)
+        signal = build_signal(inputs, market, sigma, usd_inr, source, lots=lots or None, sigma_method=method,
+                              tls_center=load_center(inputs["release_date"]))
         write_json(SIGNAL_FILE, signal)
         record_week(inputs, inputs)   # this week's surprises join the history (no-op if already there)
         s, c = signal["signal"], signal["calculations"]

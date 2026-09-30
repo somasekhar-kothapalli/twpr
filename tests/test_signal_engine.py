@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from app import model
+from app import telegram_bot as tb
 from app import signal_engine as se
 from app.signal_engine import (InputError, build_signal, fetch_usd_inr, generate_analysis, load_inputs,
                                load_lot_counts, load_lot_sizes, load_market, load_sigma)
@@ -639,3 +640,56 @@ def test_main_refuses_a_lot_count_typed_into_a_lot_size_setting(monkeypatch, tmp
     write(tmp_path)
     assert se.main(["--allow-stale"]) == 1 and not (tmp_path / "signal.json").exists() and recorded == []
     assert "MCX_CRUDEOIL_LOTS" in alerts[0][1]
+
+
+# ---------------------------------------------------------------- review follow-ups: demeaned Z, 1-minute ATR stop, deep strike
+
+
+def test_tls_center_is_the_median_of_the_last_twelve_weeks_and_needs_eight():
+    from app import model
+    rows = [{"release_date": f"{d:02d}-07-2026", "crude_surprise_mb": v, "gasoline_surprise_mb": 0.0,
+             "distillate_surprise_mb": 0.0} for d, v in zip(range(1, 10), (1, 2, 3, 4, 5, 6, 7, 8, 90))]
+    assert model.tls_center(rows) == 5          # one freak week does not move the median
+    with pytest.raises(ValueError):
+        model.tls_center(rows[:7])
+
+
+def test_the_demeaned_z_is_reported_beside_the_raw_z_and_never_changes_the_decision():
+    plain = build_signal(INPUTS, MARKET, SIGMA, 84.0, "fallback", analyse=stub())
+    centred = build_signal(INPUTS, MARKET, SIGMA, 84.0, "fallback", analyse=stub(), tls_center=1.0)
+    c, p = centred["calculations"], plain["calculations"]
+    assert p["z_tls_demeaned"] is None and c["tls_center_mb"] == 1.0
+    assert c["z_tls_demeaned"] == pytest.approx((c["tls_mb"] - 1.0) / c["sigma_forecast_mb"], abs=0.01)
+    assert (centred["signal"], c["z_tls"]) == (plain["signal"], p["z_tls"])
+
+
+def test_atr_1m_is_the_mean_true_range_and_needs_enough_bars():
+    from app.market_data import atr_1m
+    bars = [(10.0 + 0.1, 10.0 - 0.1, 10.0)] * 200        # every bar 0.2 wide, no gaps
+    assert atr_1m(bars) == pytest.approx(0.2)
+    with pytest.raises(ValueError):
+        atr_1m(bars[:50])
+
+
+def test_a_normal_swing_wider_than_the_bracket_adds_a_stop_row():
+    wide = build_signal(INPUTS, {**MARKET, "atr_1m": 0.5}, SIGMA, 84.0, "fallback", analyse=stub(),
+                        lots={"CRUDEOILM": 1})["sizing"]
+    assert wide["atr_1m_stop_usd"] == 0.75 and "0.75" in wide["contracts"]["CRUDEOILM"]["risk_inr_by_futures_stop_usd"]
+    calm = build_signal(INPUTS, {**MARKET, "atr_1m": 0.1}, SIGMA, 84.0, "fallback", analyse=stub(),
+                        lots={"CRUDEOILM": 1})["sizing"]
+    assert calm["atr_1m_stop_usd"] is None and list(calm["contracts"]["CRUDEOILM"]["risk_inr_by_futures_stop_usd"]) == \
+        ["0.18", "0.25", "0.35"]                      # inside the runbook bracket: nothing added
+    assert "0.75" in "\n".join(tb._format_sizing(wide)) and "1-minute ATR" in "\n".join(tb._format_sizing(wide))
+
+
+def test_a_deep_itm_strike_gets_the_spread_step_down_line():
+    deep = build_signal(INPUTS, {**MARKET, "ovx": 50.0}, SIGMA, 84.0, "fallback", analyse=stub())
+    assert any("step down to the 0.65-0.70" in line for line in deep["checklist"])
+    shallow = build_signal(INPUTS, {**MARKET, "ovx": 30.0}, SIGMA, 84.0, "fallback", analyse=stub())
+    assert not any("step down to the 0.65-0.70" in line for line in shallow["checklist"])
+
+
+def test_the_message_shows_the_demeaned_z_only_when_it_exists():
+    with_center = build_signal(INPUTS, MARKET, SIGMA, 84.0, "fallback", analyse=stub(), tls_center=2.0)
+    assert "Z demeaned" in tb.format_signal(with_center) and "informational" in tb.format_signal(with_center)
+    assert "Z demeaned" not in tb.format_signal(build_signal(INPUTS, MARKET, SIGMA, 84.0, "fallback", analyse=stub()))

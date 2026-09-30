@@ -403,6 +403,24 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
 - **Live finding (2026-09-30):** the history's 12-08-2026 week has a +19.9 mb TLS. With the plain
   std dev sigma was ~8.3 mb; the default MAD gives ~5.8 on the 8 prior weeks, so a trade needs
   |TLS| above ~7 mb. The 23-09 reference week (TLS +2.23) **stands down** under any method.
+- **Review follow-ups (2026-09-30, from an external review of `model.py` / `options.py`):**
+  - **Demeaned Z, informational:** `calculations.z_tls_demeaned` = (TLS minus the median of the last 12 weekly TLS) / sigma, with
+    `tls_center_mb`. Z assumes consensus is unbiased; over the 9 recorded weeks the median TLS is +2.33 mb (mean +2.61) against a
+    sigma of 4.56, about 0.5 sigma, so builds have systematically beaten consensus. It is shown beside the raw Z and **never gates**:
+    switching it on would make bearish prints need TLS ~ +8 but bullish ones only ~ -3.4, on 9 summer weeks with mixed consensus
+    panels. Compare the two over the validation weeks first.
+  - **Stop bracket vs the 1-minute ATR:** `market.json` has `atr_1m` (mean 1-minute true range, last 5 sessions, `null` in replays).
+    If 1.5 x it exceeds the runbook's $0.35, the sizing table gets an extra stop row (`sizing.atr_1m_stop_usd`). Live 2026-09-30:
+    0.105 -> 0.16, inside the bracket, so nothing is added; WTI's ~$3 daily range is not the scale of a one-minute stop.
+  - **Deep-ITM strikes:** with delta 0.80-0.85 the checklist says to step down to 0.65-0.70 if the deep strike's spread is wide. No
+    strike-count cap: 3 strikes (Rs 150) is ~1.7% ITM, which would switch the deepening off. Only the live chain and the journal's
+    slippage can set the threshold.
+  - **Not built, on purpose:** a mirror of Regime 3 (extreme bearish API, smaller EIA build, overnight selloff, so buy): the
+    runbook has no such case and there is no data to test it. The Cushing multiplier applies to both directions (low stocks may
+    amplify draws more than builds: a judgment call, unproven). API surprises under 3.0 mb are ignored by Regime 3 and the
+    history does not store the API figure, so their value cannot be tested yet.
+  - **Reminder:** the 2027 futures/options calendars and MCX holidays are not loaded (2027 expiries are a flagged guess): load
+    them when MCX publishes them, around December 2026.
 - **USD/INR** comes from `yfinance` (`INR=X`, 10 s timeout), then **FreeCurrencyAPI** as a backup
   (`FREECURRENCYAPI_KEY` in `.env`; `signal.inputs.usd_inr_source` says which answered). A quote outside 50-150
   is bad data. **There is no default rate any more:** with neither source the engine raises

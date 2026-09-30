@@ -180,7 +180,7 @@ def strike_guidance(futures_inr, iv_pct, days, delta_range, option_type):
     return guide
 
 
-def sizing(lots_by_contract, usd_inr, delta_range):
+def sizing(lots_by_contract, usd_inr, delta_range, stops=STOP_BRACKET_USD):
     """What the lots you trade lose in INR if the option's stop is hit, per contract and for each
     futures stop in the runbook's $0.18-$0.35 bracket, at the middle of the delta range:
 
@@ -196,7 +196,7 @@ def sizing(lots_by_contract, usd_inr, delta_range):
             name: {"lots": lots, "barrels_per_lot": CONTRACT_BARRELS[name],
                    "risk_inr_by_futures_stop_usd": {
                        f"{stop:.2f}": int(round(lots * stop * usd_inr * delta * CONTRACT_BARRELS[name]))
-                       for stop in STOP_BRACKET_USD}}
+                       for stop in stops}}
             for name, lots in lots_by_contract.items()
         },
     }
