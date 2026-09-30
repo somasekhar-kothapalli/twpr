@@ -38,6 +38,9 @@ def setup_logging():
     # token in its path - left on, the token lands in every log (incl. CI run logs).
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    # yfinance logs an ERROR for every symbol it cannot find (an expired futures contract is
+    # normal here). Our callers handle missing data themselves and report it once, clearly.
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 
 def now_utc():

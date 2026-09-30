@@ -64,14 +64,14 @@ MARKET = {"as_of": "29-09-2026", "wti": 89.63, "atr_20": 2.5, "ovx": 54.9,
 
 def test_main_writes_the_market_file(monkeypatch):
     alerts, writes = arm(monkeypatch, MARKET)
-    assert md.main() == 0
+    assert md.main([]) == 0
     assert writes == [(md.MARKET_FILE, MARKET)] and alerts == []
 
 
 def test_main_failure_alerts_and_writes_nothing(monkeypatch):
     boom = RuntimeError("no data for ^OVX")
     alerts, writes = arm(monkeypatch, error=boom)
-    assert md.main() == 1
+    assert md.main([]) == 1
     assert alerts == [("market_data.py", boom)] and writes == []
 
 
@@ -134,3 +134,35 @@ def test_overnight_rally_is_none_when_either_price_is_missing():
     assert md.overnight_rally([], ny(2026, 9, 30, 10, 0)) is None
     only_later = [(ny(2026, 9, 30, 9, 0), 89.0)]
     assert md.overnight_rally(only_later, ny(2026, 9, 30, 10, 0)) is None                # no price at the API time
+
+
+# ---------------------------------------------------------------------- replay (--date)
+
+def test_replay_moment_is_one_minute_before_the_print_new_york_time():
+    assert md.replay_moment("23-09-2026") == datetime(2026, 9, 23, 10, 29, tzinfo=NY)
+    with pytest.raises(ValueError):
+        md.replay_moment("2026-09-23")
+
+
+def test_main_date_replays_as_of_that_release(monkeypatch):
+    seen = []
+    monkeypatch.setattr(md, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(md, "write_json", lambda path, payload: None)
+    monkeypatch.setattr(md, "fetch_market", lambda **kw: seen.append(kw) or MARKET)
+    assert md.main(["--date", "23-09-2026"]) == 0 and md.main([]) == 0
+    assert seen == [{"asof": datetime(2026, 9, 23, 10, 29, tzinfo=NY)}, {"asof": None}]
+
+
+def test_a_bad_date_is_an_argument_error_not_a_silent_live_run(monkeypatch):
+    monkeypatch.setattr(md, "load_dotenv", lambda *a, **k: None)
+    with pytest.raises(SystemExit):
+        md.main(["--date", "yesterday"])
+
+
+def test_a_missing_contract_probe_is_quiet(caplog):
+    import logging
+    with caplog.at_level(logging.INFO):
+        assert md.optional("CLV26.NYM", lambda: 1 / 0, quiet=True) is None
+        assert caplog.text == ""
+        assert md.optional("DXY", lambda: 1 / 0) is None
+    assert "DXY unavailable" in caplog.text

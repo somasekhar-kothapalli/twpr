@@ -13,16 +13,18 @@ so the run fails loudly (Telegram alert, exit 1, nothing written). The scorecard
 values are context; any that cannot be read become null.
 
 Run from the repo root:
-    python -m app.market_data
+    python -m app.market_data                      # now (run shortly before the print)
+    python -m app.market_data --date 23-09-2026    # replay: as of 10:29 ET on that release day
 """
+import argparse
 import logging
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-from app.utils.common import MARKET_FILE, ROOT, fmt, fmt_ts, now_ist, now_utc, setup_logging, write_json
+from app.utils.common import DATE_FORMAT, MARKET_FILE, ROOT, fmt, fmt_ts, now_ist, now_utc, setup_logging, write_json
 from app.utils.telegram import send_exception
 
 logger = logging.getLogger("twpr.market_data")
@@ -114,41 +116,65 @@ def overnight_rally(bars, now):
     return {"rally_usd": round(end - start, 2), "api_price": round(start, 2), "pre_print_price": round(end, 2)}
 
 
-def intraday_bars(ticker, period="5d", interval="5m"):
-    """[(aware start time, open)] for a yfinance ticker, oldest first."""
+def replay_moment(release_date):
+    """DD-MM-YYYY -> 10:29 New York time that day: one minute before the print, the moment a
+    live run should have happened."""
+    day = datetime.strptime(release_date, DATE_FORMAT)
+    return datetime(day.year, day.month, day.day, PRINT_ET[0], PRINT_ET[1] - 1, tzinfo=NEW_YORK)
+
+
+def intraday_bars(ticker, asof=None, interval="5m"):
+    """[(aware start time, open)] for a yfinance ticker, oldest first. With `asof` (a replay), the
+    days around it (Yahoo keeps 5-minute bars for about 60 days)."""
     import yfinance as yf
-    frame = yf.Ticker(ticker).history(period=period, interval=interval, timeout=FETCH_TIMEOUT_S).dropna()
+    if asof is None:
+        frame = yf.Ticker(ticker).history(period="5d", interval=interval, timeout=FETCH_TIMEOUT_S).dropna()
+    else:
+        day = asof.date()
+        frame = yf.Ticker(ticker).history(start=day - timedelta(days=5), end=day + timedelta(days=1),
+                                          interval=interval, timeout=FETCH_TIMEOUT_S).dropna()
     if frame.empty:
         raise RuntimeError(f"no intraday data for {ticker}")
     return [(ts.to_pydatetime(), float(row.Open)) for ts, row in zip(frame.index, frame.itertuples())]
 
 
-def history(ticker, period="3mo"):
-    """(bars, dates) for a yfinance ticker: (high, low, close) per day and the matching dates, oldest first."""
+def history(ticker, period="3mo", before=None, lookback_days=150):
+    """(bars, dates) for a yfinance ticker: (high, low, close) per day and the matching dates, oldest
+    first. With `before` (a date, for a replay) only days strictly before it."""
     import yfinance as yf
-    frame = yf.Ticker(ticker).history(period=period, timeout=FETCH_TIMEOUT_S).dropna()
+    if before is None:
+        frame = yf.Ticker(ticker).history(period=period, timeout=FETCH_TIMEOUT_S).dropna()
+    else:
+        frame = yf.Ticker(ticker).history(start=before - timedelta(days=lookback_days), end=before,
+                                          timeout=FETCH_TIMEOUT_S).dropna()
     if frame.empty:
         raise RuntimeError(f"no data for {ticker}")
     return [(float(r.High), float(r.Low), float(r.Close)) for r in frame.itertuples()], [d.date() for d in frame.index]
 
 
-def last_close(ticker):
-    bars, dates = history(ticker, "5d")
+def last_close(ticker, before=None):
+    bars, dates = history(ticker, "5d", before, lookback_days=10)
     return bars[-1][2], dates[-1]
 
 
-def optional(name, fn):
-    """fn() -> value, or None (logged) if it fails: a scorecard input never sinks the run."""
+def optional(name, fn, quiet=False):
+    """fn() -> value, or None (logged) if it fails: a scorecard input never sinks the run.
+    `quiet` logs at debug level: for probes where a miss is normal (an expired contract)."""
     try:
         return fn()
     except Exception as exc:  # noqa: BLE001 - any failure means "not available"
-        logger.warning("%s unavailable: %s", name, exc)
+        (logger.debug if quiet else logger.warning)("%s unavailable: %s", name, exc)
         return None
 
 
-def fetch_market(today=None):
-    today = today or now_ist().date()
-    bars, dates = history("CL=F")
+def fetch_market(today=None, asof=None):
+    """The market inputs now, or - with `asof` (an aware datetime, see replay_moment) - as they stood
+    then: only days before that date, and the overnight rally up to that moment."""
+    if asof is not None:
+        today, before, now = asof.date(), asof.date(), asof
+    else:
+        today, before, now = today or now_ist().date(), None, now_utc()
+    bars, dates = history("CL=F", before=before)
     wti, as_of = bars[-1][2], dates[-1]      # latest quote (live if the session is open)
     if dates[-1] >= today:                   # today's bar is still forming: ATR uses completed days only
         bars = bars[:-1]
@@ -156,33 +182,36 @@ def fetch_market(today=None):
         "as_of": fmt(as_of),
         "wti": round(wti, 2),
         "atr_20": round(atr(bars), 3),
-        "ovx": round(last_close("^OVX")[0], 2),
+        "ovx": round(last_close("^OVX", before)[0], 2),
     }
 
     def spread():
-        closes = {s: optional(s, lambda s=s: last_close(s)[0]) for s in contract_symbols(today)}
+        closes = {s: optional(s, lambda s=s: last_close(s, before)[0], quiet=True) for s in contract_symbols(today)}
         pair = front_second(wti, closes)
         if pair is None:
             raise RuntimeError("could not identify the front contract")
         return round(pair[0] - pair[1], 2)
 
     market["cl1_cl2"] = optional("CL1-CL2", spread)
-    market["brent_wti"] = optional("Brent-WTI", lambda: round(last_close("BZ=F")[0] - wti, 2))
-    market["crack_321"] = optional("3:2:1 crack", lambda: round(crack_321(wti, last_close("RB=F")[0], last_close("HO=F")[0]), 2))
-    market["dxy"] = optional("DXY", lambda: round(last_close("DX-Y.NYB")[0], 2))
-    move = optional("overnight rally", lambda: overnight_rally(intraday_bars("CL=F"), now_utc()))
+    market["brent_wti"] = optional("Brent-WTI", lambda: round(last_close("BZ=F", before)[0] - wti, 2))
+    market["crack_321"] = optional("3:2:1 crack", lambda: round(crack_321(wti, last_close("RB=F", before)[0], last_close("HO=F", before)[0]), 2))
+    market["dxy"] = optional("DXY", lambda: round(last_close("DX-Y.NYB", before)[0], 2))
+    move = optional("overnight rally", lambda: overnight_rally(intraday_bars("CL=F", asof), now))
     market["overnight_rally_usd"] = move["rally_usd"] if move else None
     market["overnight_api_price"] = move["api_price"] if move else None
     market["overnight_pre_print_price"] = move["pre_print_price"] if move else None
-    market["fetched_at"] = fmt_ts(now_ist())
+    market["fetched_at"] = fmt_ts(asof.astimezone(now_ist().tzinfo) if asof else now_ist())
     return market
 
 
-def main():
+def main(argv=None):
     setup_logging()
     load_dotenv(ROOT / ".env")
+    parser = argparse.ArgumentParser(description="Market inputs for the WPSR model")
+    parser.add_argument("--date", type=replay_moment, help="replay a release, DD-MM-YYYY: the inputs as of 10:29 ET that day")
+    args = parser.parse_args(argv)
     try:
-        market = fetch_market()
+        market = fetch_market(asof=args.date)
         write_json(MARKET_FILE, market)
     except Exception as exc:  # noqa: BLE001 - alert instead of failing silently
         logger.error("market data failed: %s", exc)

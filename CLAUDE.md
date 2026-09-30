@@ -59,6 +59,7 @@ python -m app.eia_actuals --once                    # single attempt
 python -m app.eia_actuals --date 23-09-2026 --once  # replay a specific release
 
 python -m app.market_data                          # yfinance inputs -> data/market.json
+python -m app.market_data --date 23-09-2026          # replay: the inputs as of 10:29 ET that day
 python -m app.surprise_history --backfill          # one-off: past weekly surprises -> data/surprise_history.json
 
 python -m app.signal_engine                        # data/*.json -> data/signal.json (needs market.json + surprise_history.json)
@@ -227,7 +228,11 @@ true ranges of daily WTI bars; today's still-forming bar is excluded), `ovx`, `c
 nothing written); the scorecard values become `null` if unreadable. CL2 has no continuous
 ticker: `contract_symbols` builds `CL<month><yy>.NYM` and `front_second` picks the contract
 trading at CL=F's price (within 0.25) and the one after it; no match -> `cl1_cl2: null`, never
-a guess. Expired contracts log a yfinance 404 (harmless).
+a guess. Expired contracts are probed quietly (yfinance's own error logging is silenced in
+`setup_logging`). `--date DD-MM-YYYY` replays a release: only days before it, the overnight rally up to
+10:29 ET, `fetched_at` set to that moment. Yahoo keeps 5-minute bars only ~60 days, and near a contract
+expiry the expired contract has no history, so a replay may give `cl1_cl2: null` (and a continuous-series
+roll can distort the rally): treat replays as approximate.
 
 ### `app/model.py`, `app/surprise_history.py`, `utils/eia_levels.py` — runbook inputs
 

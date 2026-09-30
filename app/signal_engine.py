@@ -288,7 +288,7 @@ def generate_analysis(user_prompt):
             messages=[{"role": "system", "content": GROQ_SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
         )
         choice = response.choices[0]
-        text = choice.message.content.strip()
+        text = choice.message.content.strip() # type: ignore
         if len(text) > ANALYSIS_MAX_CHARS or getattr(choice, "finish_reason", None) == "length":
             # over the cap, or the model ran out of tokens mid-sentence: never ship half a sentence
             text = complete_sentences(text[:ANALYSIS_MAX_CHARS]).strip()  # type: ignore
