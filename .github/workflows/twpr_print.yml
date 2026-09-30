@@ -69,6 +69,6 @@ jobs:
         run: |
           git config user.name  "twpr-bot"
           git config user.email "twpr-bot@users.noreply.github.com"
-          for f in data/eia_actuals.json data/signal.json data/surprise_history.json; do [ -f "$f" ] && git add -f "$f"; done
+          for f in data/eia_actuals.json data/signal.json data/surprise_history.json; do if [ -f "$f" ]; then git add -f "$f"; fi; done
           git diff --staged --quiet || git commit -m "data: EIA actuals and signal"
           git pull --rebase && git push
