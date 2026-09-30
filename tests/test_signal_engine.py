@@ -44,7 +44,7 @@ def test_reference_week_is_regime_1_bearish_put_with_deep_itm_delta():
         == ("trade", 1, "bearish", "PUT", "ITM")
     assert c["cushing_contradicts"] is False and c["cushing_multiplier"] == pytest.approx(1.391, abs=1e-3)
     assert s["option"]["ovx_deepened"] is True and (s["option"]["delta_low"], s["option"]["delta_high"]) == (0.80, 0.85)
-    assert (s["option"]["expiry_date"], s["option"]["days_to_expiry"], s["option"]["rolled"]) == ("19-10-2026", 26, False)
+    assert (s["option"]["expiry_date"], s["option"]["days_to_expiry"], s["option"]["rolled"]) == ("15-10-2026", 22, False)
     assert s["schedule"]["release_ist"] == "20:00" and s["schedule"]["hard_exit_ist"] == "22:30"
 
 

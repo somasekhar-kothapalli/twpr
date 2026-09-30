@@ -11,14 +11,29 @@ def test_delta_deepens_only_when_ovx_is_strictly_above_35():
     assert options.target_delta(20.0)[2] is False
 
 
+def test_option_expiry_is_two_business_days_before_the_futures_expiry():
+    assert options.futures_expiry(2026, 10) == date(2026, 10, 19)      # a Monday
+    assert options.option_expiry(2026, 10) == date(2026, 10, 15)       # the confirmed date: Thursday 15 Oct
+    assert options.option_expiry(2026, 11) == date(2026, 11, 17)       # futures Thu 19th -> Tue 17th
+    assert options.option_expiry(2027, 1) == date(2027, 1, 15)         # futures Tue 19th -> Fri 15th
+    assert options.futures_expiry(2026, 9) == date(2026, 9, 18)        # the 19th is a Saturday: Friday
+    assert options.option_expiry(2026, 9) == date(2026, 9, 16)
+
+
+def test_a_holiday_is_skipped_when_counting_back(monkeypatch):
+    monkeypatch.setattr(options, "HOLIDAYS", frozenset({date(2026, 10, 16)}))
+    assert options.option_expiry(2026, 10) == date(2026, 10, 14)       # Fri 16th no longer counts
+
+
 @pytest.mark.parametrize("release,expiry,days,rolled", [
-    (date(2026, 9, 23), "19-10-2026", 26, False),     # 23-09 is past this month's 19th: October's expiry
-    (date(2026, 10, 7), "19-10-2026", 12, False),
-    (date(2026, 10, 13), "19-10-2026", 6, False),     # 6 days left: still current month
-    (date(2026, 10, 14), "19-11-2026", 36, True),     # exactly 5 days left: roll
-    (date(2026, 10, 19), "19-11-2026", 31, True),     # expiry day itself
-    (date(2026, 12, 15), "19-01-2027", 35, True),     # rolls over the year end
-    (date(2026, 12, 24), "19-01-2027", 26, False),
+    (date(2026, 9, 23), "15-10-2026", 22, False),     # the confirmed October expiry
+    (date(2026, 10, 7), "15-10-2026", 8, False),
+    (date(2026, 10, 9), "15-10-2026", 6, False),      # 6 days left: still the current month
+    (date(2026, 10, 10), "17-11-2026", 38, True),     # exactly 5 days left (a Saturday): roll
+    (date(2026, 10, 15), "17-11-2026", 33, True),     # expiry day itself
+    (date(2026, 10, 16), "17-11-2026", 32, False),    # October is gone: November is simply the nearest
+    (date(2026, 12, 15), "15-01-2027", 31, True),     # December options expired on the 16th... 1 day away: roll
+    (date(2026, 12, 24), "15-01-2027", 22, False),    # rolls over the year end
 ])
 def test_expiry_gate(release, expiry, days, rolled):
     assert options.pick_expiry(release) == {"expiry_date": expiry, "days_to_expiry": days, "rolled": rolled}

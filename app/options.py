@@ -15,8 +15,12 @@ DELTA_DEFAULT = (0.60, 0.70)
 DELTA_HIGH_OVX = (0.80, 0.85)
 OVX_DEEPEN_ABOVE = 35.0        # strictly above: deepen to delta 0.80-0.85
 
-MCX_EXPIRY_DAY = 19            # ASSUMPTION: README section 13 says expiry on the 19th/20th; weekends
-                               # and holidays are not modelled - confirm the real expiry on your chain
+FUTURES_EXPIRY_DAY = 19        # MCX crude futures expire on the 19th (README section 13)...
+OPTION_LEAD_BUSINESS_DAYS = 2  # ...and the OPTIONS expire this many business days earlier. Rule inferred from
+                               # one confirmed date (October 2026: options 15 Oct, futures Mon 19 Oct) plus an
+                               # external review - confirm other months on your chain.
+HOLIDAYS = frozenset()         # MCX trading holidays (datetime.date). Empty: only weekends are skipped, so a
+                               # holiday near expiry would shift the real date by a day. Fill in from the MCX list.
 ROLL_WITHIN_DAYS = 5           # runbook: current month only if MORE than 5 days remain
 LOT_BARRELS = 100              # MCX crude lot
 RISK_FRACTION = 0.01           # 1% of account equity per event
@@ -35,13 +39,39 @@ def target_delta(ovx):
     return (*DELTA_DEFAULT, False)
 
 
+def _is_business_day(day):
+    return day.weekday() < 5 and day not in HOLIDAYS
+
+
+def _business_days_before(day, count):
+    """`day` moved back `count` business days (count 0 = the previous business day if `day` is not one)."""
+    while not _is_business_day(day):
+        day -= timedelta(days=1)
+    for _ in range(count):
+        day -= timedelta(days=1)
+        while not _is_business_day(day):
+            day -= timedelta(days=1)
+    return day
+
+
+def futures_expiry(year, month):
+    """The month's futures expiry: the 19th, or the previous business day if that is not one."""
+    return _business_days_before(date(year, month, FUTURES_EXPIRY_DAY), 0)
+
+
+def option_expiry(year, month):
+    """The month's option expiry: OPTION_LEAD_BUSINESS_DAYS business days before the futures expiry
+    (October 2026: futures Mon 19th -> options Thu 15th)."""
+    return _business_days_before(futures_expiry(year, month), OPTION_LEAD_BUSINESS_DAYS)
+
+
 def _expiry_on_or_after(day):
-    """The first MCX_EXPIRY_DAY on or after `day`."""
-    this_month = date(day.year, day.month, MCX_EXPIRY_DAY)
+    """The first option expiry on or after `day`."""
+    this_month = option_expiry(day.year, day.month)
     if day <= this_month:
         return this_month
     year, month = (day.year + 1, 1) if day.month == 12 else (day.year, day.month + 1)
-    return date(year, month, MCX_EXPIRY_DAY)
+    return option_expiry(year, month)
 
 
 def pick_expiry(release_day):

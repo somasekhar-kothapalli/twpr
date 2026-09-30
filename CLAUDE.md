@@ -286,8 +286,11 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
   vetoes the trade: the move feeds the message, not sizing or entries. An external review
   called beta_vol "pseudo-math" with no theoretical basis. Unknown Cushing level -> multiplier 1.0, `cushing_level_known: false`.
 - **Option:** ITM only. Delta 0.60-0.70, or 0.80-0.85 when OVX is strictly above 35.
-  Expiry = the nearest 19th (`MCX_EXPIRY_DAY`, **an assumption** from README section 13 -
-  confirm on your chain), rolled to next month when 5 or fewer days remain. No option-chain
+  Expiry = the nearest **option** expiry, which is `OPTION_LEAD_BUSINESS_DAYS` (2) business days
+  before the futures expiry (the 19th, or the previous business day): October 2026 options expire
+  Thu 15 Oct (confirmed by the user; futures Mon 19th). Other months follow the same rule but are
+  unconfirmed, and MCX holidays are not modelled (`options.HOLIDAYS` is empty - fill it in).
+  Rolled to next month when 5 or fewer days remain. No option-chain
   feed exists: the strike is left to you (pick the ITM strike whose delta is in range).
 - **Sizing:** `ACCOUNT_EQUITY_INR` (optional; unset -> `sizing: null`) x 1%, converted through
   USD/INR and the mid delta, given as lots **per futures stop** ($0.18 / $0.25 / $0.35)

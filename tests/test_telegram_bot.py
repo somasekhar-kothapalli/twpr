@@ -31,7 +31,7 @@ def test_regime_1_message_has_everything_needed_to_act():
         "Surprises: crude +3.569 | gasoline -1.786 | distillate +0.172",
         "Cushing: +2.266 mb (confirms), level 23.7 mb, x1.39",
         "API crude: +1.786 mb (aligns)",
-        "Option: delta 0.80-0.85 (OVX 53.7 above 35, deep ITM) | expiry 19-10-2026 (26d)",
+        "Option: delta 0.80-0.85 (OVX 53.7 above 35, deep ITM) | expiry 15-10-2026 (22d)",
         "Expected WTI move (beta_vol): -2.01 USD = -168 INR on MCX (USD/INR 84.00, yfinance), 0.90 USD per mb",
         "Anchor (0.15-0.30 USD per mb): -0.33 to -0.67 USD = -28 to -56 INR - beta_vol is outside it",
         "Risk 1% = INR 10,000 | lots by futures stop:",
