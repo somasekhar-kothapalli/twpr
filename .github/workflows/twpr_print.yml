@@ -60,6 +60,20 @@ jobs:
       - if: steps.done.outputs.skip != 'true'
         run: python -m playwright install --with-deps chromium
 
+      # The pre job may have missed (consensus posts late). Without today's consensus the signal cannot be built,
+      # so redo the whole pre phase (consensus, API, market data) up to 3 times, a minute apart.
+      - name: Pre phase again if today's consensus is missing
+        if: steps.done.outputs.skip != 'true'
+        run: |
+          today=$(TZ=Asia/Kolkata date +%d-%m-%Y)
+          have() { [ -f data/consensus.json ] && [ "$(python -c "import json;print(json.load(open('data/consensus.json')).get('release_date'))")" = "$today" ]; }
+          for i in 1 2 3; do
+            have && break
+            echo "no consensus for $today, pre phase attempt $i"
+            xvfb-run -a python -m app.run pre || true
+            have || sleep 60
+          done
+
       - name: EIA actuals, signal, alert
         if: steps.done.outputs.skip != 'true'
         run: xvfb-run -a python -m app.run print
