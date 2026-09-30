@@ -1,0 +1,50 @@
+name: TWPR Pre-print
+
+# Wednesday 19:00 IST = 13:30 UTC (print is 20:00 IST = 14:30 UTC while US daylight saving lasts).
+# Consensus, API crude, market data, then the pre-brief. Data goes back to the repo for the print job.
+on:
+  schedule:
+    - cron: "30 13 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: twpr-data
+  cancel-in-progress: false
+
+jobs:
+  pre:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      FREECURRENCYAPI_KEY: ${{ secrets.FREECURRENCYAPI_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GROQ_MODEL: ${{ vars.GROQ_MODEL }}
+      SIGMA_METHOD: ${{ vars.SIGMA_METHOD }}
+      MCX_CRUDEOIL_LOTS: ${{ vars.MCX_CRUDEOIL_LOTS }}
+      MCX_CRUDEOILM_LOTS: ${{ vars.MCX_CRUDEOILM_LOTS }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
+
+      # The scrapers open a headed browser, so give it a virtual display.
+      - name: Consensus, API, market data, pre-brief
+        run: xvfb-run -a python -m app.run pre
+
+      - name: Commit data
+        if: always()
+        run: |
+          git config user.name  "twpr-bot"
+          git config user.email "twpr-bot@users.noreply.github.com"
+          git add -f data/consensus.json data/api_report.json data/market.json data/surprise_history.json
+          git diff --staged --quiet || git commit -m "data: pre-print inputs"
+          git pull --rebase && git push

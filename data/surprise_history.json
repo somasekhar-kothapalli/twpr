@@ -1,0 +1,56 @@
+[
+  {
+    "release_date": "29-07-2026",
+    "crude_surprise_mb": -7.867,
+    "gasoline_surprise_mb": -0.693,
+    "distillate_surprise_mb": 0.862
+  },
+  {
+    "release_date": "05-08-2026",
+    "crude_surprise_mb": 3.979,
+    "gasoline_surprise_mb": -0.343,
+    "distillate_surprise_mb": -3.673
+  },
+  {
+    "release_date": "12-08-2026",
+    "crude_surprise_mb": 19.123,
+    "gasoline_surprise_mb": 0.232,
+    "distillate_surprise_mb": 1.29
+  },
+  {
+    "release_date": "19-08-2026",
+    "crude_surprise_mb": 4.205,
+    "gasoline_surprise_mb": 1.888,
+    "distillate_surprise_mb": -0.63
+  },
+  {
+    "release_date": "26-08-2026",
+    "crude_surprise_mb": -1.505,
+    "gasoline_surprise_mb": -1.836,
+    "distillate_surprise_mb": -0.628
+  },
+  {
+    "release_date": "02-09-2026",
+    "crude_surprise_mb": -4.05,
+    "gasoline_surprise_mb": 0.727,
+    "distillate_surprise_mb": 2.096
+  },
+  {
+    "release_date": "10-09-2026",
+    "crude_surprise_mb": 1.009,
+    "gasoline_surprise_mb": 2.669,
+    "distillate_surprise_mb": 2.787
+  },
+  {
+    "release_date": "16-09-2026",
+    "crude_surprise_mb": 0.96,
+    "gasoline_surprise_mb": 1.794,
+    "distillate_surprise_mb": 1.485
+  },
+  {
+    "release_date": "23-09-2026",
+    "crude_surprise_mb": 3.669,
+    "gasoline_surprise_mb": -1.786,
+    "distillate_surprise_mb": 0.172
+  }
+]
