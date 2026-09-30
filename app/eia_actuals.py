@@ -17,6 +17,10 @@ best effort: only investing.com has it, so it is an optional field of the race
 (investing fetches it first and the race waits `REFINERY_GRACE_S` for it once the
 report is decided; null if it didn't arrive in time). Nothing downstream reads it.
 
+`cushing_level_mb` (million barrels) comes from EIA's public weekly table, not the
+scrapers (`utils/eia_levels.py`); it is checked against `cushing_change_mb` and is null
+if EIA hasn't updated yet - it never sinks the report.
+
 Run from the repo root:
     python -m app.eia_actuals                      # today's report, polling
     python -m app.eia_actuals --once               # one attempt
@@ -27,6 +31,7 @@ import logging
 import os
 
 from app.utils.common import EIA_ACTUALS_FILE, now_ist, now_utc, poll, setup_logging, write_json
+from app.utils.eia_levels import cushing_level
 from app.utils.racer import race
 from app.utils.telegram import send_exception
 from app.scraper.sources import SOURCE_NAMES, scraper_for, slug_for
@@ -143,6 +148,7 @@ def main(argv=None):
             "released_at": released_at,
             "crude_change_mb": result["crude_change_mb"],
             "cushing_change_mb": result["cushing_change_mb"],
+            "cushing_level_mb": cushing_level(result["cushing_change_mb"]),
             "gasoline_change_mb": result["gasoline_change_mb"],
             "distillate_change_mb": result["distillate_change_mb"],
             "refinery_util_change_pct": result["refinery_util_change_pct"],
@@ -153,9 +159,9 @@ def main(argv=None):
         write_json(EIA_ACTUALS_FILE, payload)
         refinery = payload["refinery_util_change_pct"]
         logger.info(
-            "EIA %s (%s): crude %+.3f | cushing %+.3f | gasoline %+.3f | distillate %+.3f | refinery util change %s",
+            "EIA %s (%s): crude %+.3f | cushing %+.3f (level %s) | gasoline %+.3f | distillate %+.3f | refinery util change %s",
             payload["release_date"], payload["source"], payload["crude_change_mb"],
-            payload["cushing_change_mb"], payload["gasoline_change_mb"], payload["distillate_change_mb"],
+            payload["cushing_change_mb"], payload["cushing_level_mb"], payload["gasoline_change_mb"], payload["distillate_change_mb"],
             f"{refinery:+.1f}%" if refinery is not None else "n/a",
         )
         return 0

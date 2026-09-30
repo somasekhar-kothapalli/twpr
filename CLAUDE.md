@@ -59,6 +59,7 @@ python -m app.eia_actuals --once                    # single attempt
 python -m app.eia_actuals --date 23-09-2026 --once  # replay a specific release
 
 python -m app.market_data                          # yfinance inputs -> data/market.json
+python -m app.surprise_history --backfill          # one-off: past weekly surprises -> data/surprise_history.json
 
 python -m app.signal_engine                        # data/*.json -> data/signal.json
 python -m app.signal_engine --allow-stale          # replay input files older than 2 days
@@ -230,6 +231,22 @@ nothing written); the scorecard values become `null` if unreadable. CL2 has no c
 ticker: `contract_symbols` builds `CL<month><yy>.NYM` and `front_second` picks the contract
 trading at CL=F's price (within 0.25) and the one after it; no match -> `cl1_cl2: null`, never
 a guess. Expired contracts log a yfinance 404 (harmless).
+
+### `app/model.py`, `app/surprise_history.py`, `utils/eia_levels.py` — runbook inputs
+
+- `model.py` is pure: `tls` (weights w_g 0.67, 0.80 May-Sep; w_d 0.50, 0.70 Nov-Feb, by the
+  release month), `sigma_forecast(history)` (sample std dev of the last 12 weekly TLS; **raises
+  under 8 weeks**, never guesses) and `z_score`.
+- `surprise_history.py` keeps `data/surprise_history.json` (`SURPRISE_HISTORY_FILE`): per release,
+  crude/gasoline/distillate surprise = actual - consensus. `--backfill` reads investing.com (~10
+  past releases, three paced sessions; TE only shows ~3) and never overwrites existing weeks;
+  `record_week` appends the live week. Backfilled surprises use investing.com's consensus panel,
+  live ones TE's. `data/*` is git-ignored, so this file is local state.
+- `eia_actuals.json` now also has `cushing_level_mb`, read from EIA's public weekly table
+  (no API key; `utils/eia_levels.py`, in thousand barrels /1000). It is accepted only if
+  level[-1] - level[-2] equals the scraped `cushing_change_mb` (so last week's level is never
+  returned as this week's), retried 3x20 s, and is `null` if EIA hasn't updated - it never
+  sinks the report.
 
 ### `app/signal_engine.py` — the signal
 

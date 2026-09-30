@@ -18,6 +18,7 @@ CONSENSUS_FILE = DATA_DIR / "consensus.json"      # consensus_fetcher -> signal_
 API_REPORT_FILE = DATA_DIR / "api_report.json"    # api_monitor       -> signal_engine
 EIA_ACTUALS_FILE = DATA_DIR / "eia_actuals.json"  # eia_actuals       -> signal_engine
 MARKET_FILE = DATA_DIR / "market.json"            # market_data       -> signal_engine
+SURPRISE_HISTORY_FILE = DATA_DIR / "surprise_history.json"  # surprise_history -> signal_engine (sigma_forecast)
 SIGNAL_FILE = DATA_DIR / "signal.json"            # signal_engine
 DATE_FORMAT = "%d-%m-%Y"
 TIMESTAMP_FORMAT = "%d-%m-%Y %H:%M"
