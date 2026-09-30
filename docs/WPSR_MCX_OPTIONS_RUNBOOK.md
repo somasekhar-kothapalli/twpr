@@ -22,7 +22,7 @@ Pre-release option premiums are inflated by event-driven implied volatility (IV)
 - **Strike selection:** ITM options only, **Delta 0.60–0.70** as the default. **Dynamic deepening (2026-09-29 addition):** if the Cboe Crude Oil Volatility Index (OVX) is elevated above 35 going into the release (typically a geopolitical supply-threat regime), shift to **Delta 0.80–0.85** instead. At high OVX the baked-in IV premium is large enough that the crush can overpower even a 0.65-delta option's price gain; a 0.80+ delta strips out most extrinsic time-value, making the position track as a near-synthetic future rather than a volatility-exposed one. ITM value comes mostly from intrinsic price movement (high delta), not volatility time-value (high vega) — this is what makes the position track the futures move instead of getting eaten by the IV crush.
 - **Expiration:** current-month expiry only if >5 days remain to expiry. If it's expiry week, roll to next month — gamma-driven bid/ask blowouts near expiry make the current-month chain untradeable for this event.
 
-*Implementation note:* the code takes the nearest **option** expiry, defined as 2 business days before the futures expiry (the 19th, or the previous business day if that is a weekend), and rolls when 5 or fewer days remain. Confirmed for October 2026 (options Thu 15 Oct, futures Mon 19 Oct); the rule for other months is inferred from that and unverified. Weekends are skipped but **MCX holidays are not** (`HOLIDAYS` in `app/options.py` is empty) — check the expiry on your chain, especially in a holiday month. The pipeline has no option-chain feed, so it states the target delta range and expiry but **you pick the ITM strike** whose delta falls in range.
+*Implementation note:* the code takes the nearest **option** expiry, defined as 2 business days before the futures expiry as listed in MCX's 2026 launch calendar (not a fixed day: Jan 16, Feb 19, Mar 19, Apr 20, May 18, Jun 18, Jul 20, Aug 19, Sep 21, Oct 19, Nov 19, Dec 18), and rolls when 5 or fewer days remain. The two-business-day rule is stated in MCX's option specification ("two business days prior to the expiry day of the underlying futures contract"), e.g. October 2026: futures Mon 19 Oct, options Thu 15 Oct. A month outside the loaded calendar (2027 on) falls back to the 19th and is flagged as a guess in the signal. Weekends are skipped but **MCX holidays are not** (`HOLIDAYS` in `app/options.py` is empty) — check the expiry on your chain, especially in a holiday month. The pipeline has no option-chain feed, so it states the target delta range and expiry but **you pick the ITM strike** whose delta falls in range.
 
 ---
 
@@ -114,6 +114,17 @@ Per External Review #7 (README.md), approved for live execution subject to this 
 
 ---
 
+## 6.1 MCX contract facts that change the trade (MCX options specification, March 2026, and the 2024 leaflet)
+
+- **Options exist on the mini contract too** (`CRUDEOILM`, 10 bbl): a real way to trade 1/10th the size. Same expiry rule, tick Rs 0.05 (Rs 0.10 for the full contract), strike interval Rs 50, 51 strikes per side.
+- **75 strikes are listed in the money** (Rs 50 apart = Rs 3,750, about 43% of the futures price) in the March 2026 specification, so the 0.80-0.85 delta strike exists in any month (at IV 54% it is about 17-26 strikes ITM). An earlier draft of this section relied on the 2024 leaflet's 25 ITM strikes and concluded the 0.85 strike would vanish after a roll; the newer specification overturns that. You still pick the strike from the live chain.
+- **You pay the whole premium upfront** and it is your maximum loss if you held: about Rs 1.3 lakh per crude lot or Rs 13,000 per mini lot for a deep-ITM option (estimate). The INR-at-risk figures in the signal are what you lose at your *stop*, a small fraction of that.
+- **Futures price limit is 4%, widening to 6% and 9%.** In a volatile regime (OVX 54, daily sigma about 3.4%) 4% is a little over one sigma; a shock can lock the futures and freeze the options. The circuit-limit rule in §5.3 is not theoretical. The signal now prints the expected move as a share of the 4% band and warns when it is 75% or more.
+- **Session ends 23:30 IST, or 23:55 during US daylight-saving time.** The hard exit must sit well before the close: 22:30 IST works in summer (print 20:00), but the "print + 2.5 h" rule lands at 23:30 in winter (print 21:00), which is the closing minute.
+- **European options that devolve into futures at expiry** (March 2026 spec): a long call becomes long futures, a long put short futures, at the strike, needing futures margin; the exchange may add pre-expiry margin in the last days. This is what the expiry gate and the same-evening exit protect against.
+
+---
+
 ## 7. Implementation Status (app/code, 2026-09-30)
 
 The pipeline in this repo produces the pre-release inputs and the signal; the option side is partly manual. See also the status table at the end of [WPSR_WEDNESDAY_RUNBOOK.md](WPSR_WEDNESDAY_RUNBOOK.md).
@@ -121,7 +132,7 @@ The pipeline in this repo produces the pre-release inputs and the signal; the op
 | Item in this file | Status |
 |---|---|
 | Delta target (0.60–0.70; 0.80–0.85 when OVX > 35, strictly above) | Automated |
-| Expiry gate (> 5 days) | Automated: option expiry = 2 business days before the 19th (Oct 2026 confirmed; other months and holidays unverified) |
+| Expiry gate (> 5 days) | Automated from MCX's 2026 expiry calendar (option expiry = 2 business days before the futures expiry); 2027 on is a flagged guess; MCX holidays not modelled |
 | ITM strike selection | **Manual**: no option-chain feed; pick the strike whose delta is in range |
 | USD → INR → premium stop, INR risk of your lots | Automated per futures stop for the lots you set in `MCX_CRUDEOIL_LOT_SIZE`; the real stop is read off the chart, and the 1% check is yours |
 | 1-lot rule for the validation window | Set `MCX_CRUDEOIL_LOT_SIZE=1` in `.env` |

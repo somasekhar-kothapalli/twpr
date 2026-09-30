@@ -14,16 +14,26 @@ DELTA_DEFAULT = (0.60, 0.70)
 DELTA_HIGH_OVX = (0.80, 0.85)
 OVX_DEEPEN_ABOVE = 35.0        # strictly above: deepen to delta 0.80-0.85
 
-FUTURES_EXPIRY_DAY = 19        # MCX crude futures expire on the 19th (README section 13)...
-OPTION_LEAD_BUSINESS_DAYS = 2  # ...and the OPTIONS expire this many business days earlier. Rule inferred from
-                               # one confirmed date (October 2026: options 15 Oct, futures Mon 19 Oct) plus an
-                               # external review - confirm other months on your chain.
+# MCX Crude Oil (100 bbl) FUTURES expiry dates, from MCX's contract launch calendar
+# (Circular MCX/TRD/319/2025, 27 Jun 2025). They are NOT a fixed day of the month: the 19th is common but
+# 2026 has the 16th, 18th, 20th and 21st too (weekends and the NYMEX-linked calendar decide).
+# The calendar for 2027 is not loaded: add it here when MCX publishes it.
+FUTURES_EXPIRY_CALENDAR = {
+    (2026, 1): date(2026, 1, 16), (2026, 2): date(2026, 2, 19), (2026, 3): date(2026, 3, 19),
+    (2026, 4): date(2026, 4, 20), (2026, 5): date(2026, 5, 18), (2026, 6): date(2026, 6, 18),
+    (2026, 7): date(2026, 7, 20), (2026, 8): date(2026, 8, 19), (2026, 9): date(2026, 9, 21),
+    (2026, 10): date(2026, 10, 19), (2026, 11): date(2026, 11, 19), (2026, 12): date(2026, 12, 18),
+}
+FALLBACK_EXPIRY_DAY = 19       # a month missing from the calendar: guess the 19th (or the business day before)
+OPTION_LEAD_BUSINESS_DAYS = 2  # MCX: options expire two business days before the underlying futures (its spec)
 HOLIDAYS = frozenset()         # MCX trading holidays (datetime.date). Empty: only weekends are skipped, so a
                                # holiday near expiry would shift the real date by a day. Fill in from the MCX list.
 ROLL_WITHIN_DAYS = 5           # runbook: current month only if MORE than 5 days remain
 CONTRACT_BARRELS = {"CRUDEOIL": 100, "CRUDEOILM": 10}   # barrels per lot: the exchange's contract sizes
                                # (CRUDEOILM is the mini contract; confirm it is what you actually trade)
 STOP_BRACKET_USD = (0.18, 0.25, 0.35)   # runbook stop range: min $0.18-$0.35 on the futures
+FUTURES_BAND_PCT = 4.0         # MCX crude futures daily price limit; widens to 6% then 9% (MCX leaflet)
+NEAR_BAND_SHARE = 0.75         # a move this close to the band is worth a warning
 
 RELEASE_ET = (10, 30)          # EIA WPSR, 10:30 AM New York time (DST-aware)
 TIME_STOP_MIN = 35             # runbook: 35 minutes post-release
@@ -54,8 +64,15 @@ def _business_days_before(day, count):
 
 
 def futures_expiry(year, month):
-    """The month's futures expiry: the 19th, or the previous business day if that is not one."""
-    return _business_days_before(date(year, month, FUTURES_EXPIRY_DAY), 0)
+    """The month's futures expiry from MCX's calendar; a month not in it falls back to the 19th (or the
+    previous business day), which is a guess - see `expiry_is_known`."""
+    known = FUTURES_EXPIRY_CALENDAR.get((year, month))
+    return known or _business_days_before(date(year, month, FALLBACK_EXPIRY_DAY), 0)
+
+
+def expiry_is_known(year, month):
+    """True if the month's futures expiry comes from MCX's calendar rather than the 19th fallback."""
+    return (year, month) in FUTURES_EXPIRY_CALENDAR
 
 
 def option_expiry(year, month):
@@ -81,7 +98,8 @@ def pick_expiry(release_day):
     if rolled:
         expiry = _expiry_on_or_after(expiry + timedelta(days=1))
     return {"expiry_date": expiry.strftime("%d-%m-%Y"), "days_to_expiry": (expiry - release_day).days,
-            "rolled": rolled}
+            "rolled": rolled,
+            "expiry_source": "mcx_calendar" if expiry_is_known(expiry.year, expiry.month) else "assumed_19th"}
 
 
 def sizing(lots_by_contract, usd_inr, delta_range):
@@ -104,6 +122,18 @@ def sizing(lots_by_contract, usd_inr, delta_range):
             for name, lots in lots_by_contract.items()
         },
     }
+
+
+def band_context(move_inr, futures_inr):
+    """The expected move against MCX's 4% futures price limit. `futures_inr` is the futures price in
+    Rs/bbl (approximately WTI x USD/INR). The limit is measured from the previous settlement and
+    the day may already have moved, so this is the move's size against a full band, not a forecast
+    of what is left. A locked futures market can freeze the options too."""
+    band_inr = futures_inr * FUTURES_BAND_PCT / 100
+    share = abs(move_inr) / band_inr
+    return {"futures_price_inr": round(futures_inr), "band_pct": FUTURES_BAND_PCT, "band_inr": round(band_inr),
+            "move_pct_of_price": round(abs(move_inr) / futures_inr * 100, 2), "move_share_of_band": round(share, 2),
+            "near_band": share >= NEAR_BAND_SHARE}
 
 
 def release_schedule(release_day):

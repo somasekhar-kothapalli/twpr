@@ -371,8 +371,12 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
             move = {"wti_usd": round(usd, 2), "mcx_inr": int(round(usd * usd_inr)),
                     "per_mb_usd": round(abs(usd) / abs(tls), 3), "sanity_ok": model.sanity_ok(tls, usd),
                     "anchor_low_usd": anchor[0], "anchor_high_usd": anchor[1],
-                    "anchor_low_inr": int(round(anchor[0] * usd_inr)), "anchor_high_inr": int(round(anchor[1] * usd_inr))}
+                    "anchor_low_inr": int(round(anchor[0] * usd_inr)), "anchor_high_inr": int(round(anchor[1] * usd_inr)),
+                    "band": options.band_context(usd * usd_inr, market["wti"] * usd_inr) if market.get("wti") else None}
         checklist = REGIME_CHECK[regime] + ([TIME_SPREAD_CHECK] if regime == 1 and direction == "bullish" else [])             + ALWAYS_CHECK
+        if option["expiry_source"] != "mcx_calendar":
+            checklist.insert(0, f"The expiry date {option['expiry_date']} is a GUESS (that month is not in the MCX "
+                             "calendar loaded: the 19th, or the business day before): check it on your chain.")
         if setup3 and regime != 3:
             checklist.insert(0, "Regime 3 inventory setup is present but the overnight rally is "
                              + ("unknown" if rally is None else f"only {rally:+.2f} USD (needs more than +1.00)")

@@ -79,7 +79,8 @@ def format_signal(signal, replay_days=None):
             f"Option: delta {option['delta_low']:.2f}-{option['delta_high']:.2f}"
             + (f" (OVX {option['ovx']:.1f} above 35, deep ITM)" if option["ovx_deepened"] else "")
             + f" | expiry {option['expiry_date']} ({option['days_to_expiry']}d"
-            + (", rolled" if option["rolled"] else "") + ")",
+            + (", rolled" if option["rolled"] else "")
+            + ("" if option["expiry_source"] == "mcx_calendar" else ", ASSUMED - check the chain") + ")",
         ]
         if move:
             lines.append(f"Expected WTI move (beta_vol): {move['wti_usd']:+.2f} USD = {move['mcx_inr']:+,} INR on MCX "
@@ -87,6 +88,13 @@ def format_signal(signal, replay_days=None):
             lines.append(f"Anchor (0.15-0.30 USD per mb): {move['anchor_low_usd']:+.2f} to {move['anchor_high_usd']:+.2f} USD"
                          f" = {move['anchor_low_inr']:+,} to {move['anchor_high_inr']:+,} INR"
                          + ("" if move["sanity_ok"] else " - beta_vol is outside it"))
+            band = move.get("band")
+            if band:
+                lines.append(f"MCX limit: futures band {band['band_pct']:.0f}% = INR {band['band_inr']:,} "
+                             f"(on ~INR {band['futures_price_inr']:,}/bbl); the beta_vol move is "
+                             f"{band['move_pct_of_price']:.1f}% of price = {band['move_share_of_band']:.0%} of the band"
+                             + (" - CLOSE to a circuit stop" if band["near_band"] else "")
+                             + "; the limit widens to 6% then 9%")
         else:
             lines.append("Targets: chart levels (no modelled move for this regime)")
         lines += _format_sizing(signal["sizing"])

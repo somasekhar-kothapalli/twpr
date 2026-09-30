@@ -258,6 +258,50 @@ roll can distort the rally): treat replays as approximate.
   returned as this week's), retried 3x20 s, and is `null` if EIA hasn't updated - it never
   sinks the report.
 
+### MCX contract facts (MCX's Crude Oil options specification from March 2026, plus the 2024 leaflet and brochure)
+
+Sources: the 100 bbl options specification "March 2026 contract onwards" (Circular MCX/TRD/100/2026, 1 March 2026) is
+the newest and wins wherever it differs from the 2024 leaflet. Source of truth for the option mechanics; `docs/WPSR_MCX_OPTIONS_RUNBOOK.md` has the trading implications.
+
+- **Options exist on both `CRUDEOIL` (underlying: the 100 bbl futures) and `CRUDEOILM` (underlying: the 10 bbl
+  mini futures)** per the 2024 leaflet; the March 2026 document covers the 100 bbl contract only, so check the
+  current mini specification before relying on `CRUDEOILM`. European calls and puts, quoted in Rs per barrel;
+  trading unit is one underlying futures contract (100 or 10 bbl). Tick Rs 0.10 (crude) / Rs 0.05 (mini); strike
+  interval **Rs 50**. **Strikes: 75 ITM, 1 near-the-money and 75 OTM (151 calls and 151 puts) in the March 2026
+  specification**, up from 25/1/25 (51) in the 2024 leaflet, so ITM strikes reach Rs 3,750 (about 43% of the
+  futures price) and the 0.80-0.85 delta strike is listed in any month at any plausible volatility.
+- **Listing:** each monthly contract launches three months before its expiry month (the October 2026 contract launched in
+  July 2026), starting the business day after the near-month futures expire, so "roll to next month" always
+  has a listed contract. The base price is the previous day's daily settlement price; the daily price limit for
+  options is Black-76 based and may be relaxed by the exchange.
+- **Expiry (last trading day) = two business days before the expiry day of the underlying futures.** The futures
+  expiry is **not a fixed day**: MCX's contract launch calendar (Circular MCX/TRD/319/2025, futures spec "January
+  2026 contract onwards") gives the 2026 dates: Jan 16, Feb 19, Mar 19, Apr 20, May 18, Jun 18, Jul 20, Aug 19,
+  Sep 21, Oct 19, Nov 19, Dec 18. They are in `options.FUTURES_EXPIRY_CALENDAR`; a month missing from it (2027 on)
+  falls back to the 19th and is flagged `expiry_source: "assumed_19th"` in the signal, the message and the
+  checklist. Oct 2026: futures Mon 19th, options Thu 15th (matches the user's date). "Business days" means MCX
+  trading days, so holidays matter (`options.HOLIDAYS` is empty). The old fixed-19th rule was wrong for a
+  third of 2026 (Sep would have been the 18th, Jul the 17th).
+- **The buyer's premium is blocked upfront in full**, in real time; there is no margin for a buyer (extreme loss
+  margin applies to shorts only). A deep-ITM option is expensive: about Rs 1,300 per bbl at today's levels, i.e.
+  roughly Rs 1.3 lakh per crude lot or Rs 13,000 per mini lot (Black-76, IV 54%, 22 days; an estimate).
+- **Pricing model: Black-76** (the exchange uses it for the option price bands), so greeks come from the futures
+  price, not spot.
+- **Futures daily price limit 4%, relaxed to 6% and then 9%** (15-minute cooling-off at the second step); option
+  bands are set from Black-76 and can freeze even when the futures are not limited.
+- **Session: 9:00 to 23:30, or to 23:55 during US daylight-saving time.** In winter the session ends at 23:30 IST,
+  exactly when the runbook's "print + 2.5 h" hard exit falls (print 21:00 IST) - see the review notes.
+- **At expiry the open position devolves into the underlying futures** (March 2026 spec): a long call becomes a long
+  futures position and a long put a short futures position, opened at the strike; ITM options are exercised
+  automatically unless the long holder gives a contrary instruction. A devolved position needs futures margin
+  and the exchange may levy extra pre-expiry margin in the last days. This is real, not a documentation quirk, and
+  it is why the system rolls when 5 or fewer days remain and exits the option the same evening: never carry it to
+  expiry. Premium settles T+1 and mark-to-market gains on options are not paid out in cash.
+- Position limit for options: 9,60,000 bbl per individual client (separate from futures); max futures order
+  10,000 bbl. Both far above one or two lots.
+- Context: MCX crude's annualised volatility was 24-47% in 2016-2024 (94% in 2020), so OVX above 35 really is
+  elevated.
+
 ### `app/signal_engine.py`, `app/options.py` — the signal
 
 Reads `consensus.json`, `api_report.json`, `eia_actuals.json`, `market.json` and
@@ -285,13 +329,17 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
   Regime 1 only; Regimes 2 and 3 target chart levels. The 0.15-0.30 USD per mb anchor is
   shown **beside** it (`anchor_low/high_usd/inr`) and `sanity_ok` says whether beta_vol falls
   inside it; **at OVX ~54 it does not** (~0.9 vs the anchor's ~0.3-0.7 for TLS 2.2). Neither
-  vetoes the trade: the move feeds the message, not sizing or entries. An external review
+  vetoes the trade: the move feeds the message, not sizing or entries. `expected_move.band` sets the
+  beta_vol move against MCX's 4% futures price limit (Rs ~ WTI x USD/INR; the limit widens to 6% then 9%),
+  as a share of the band, and flags `near_band` at 75% or more: a locked futures market can freeze the
+  options. The band is measured from the previous settlement and the day may already have moved, so it
+  is the move's size against a full band, not what is left. An external review
   called beta_vol "pseudo-math" with no theoretical basis. Unknown Cushing level -> multiplier 1.0, `cushing_level_known: false`.
 - **Option:** ITM only. Delta 0.60-0.70, or 0.80-0.85 when OVX is strictly above 35.
   Expiry = the nearest **option** expiry, which is `OPTION_LEAD_BUSINESS_DAYS` (2) business days
-  before the futures expiry (the 19th, or the previous business day): October 2026 options expire
-  Thu 15 Oct (confirmed by the user; futures Mon 19th). Other months follow the same rule but are
-  unconfirmed, and MCX holidays are not modelled (`options.HOLIDAYS` is empty - fill it in).
+  before the futures expiry taken from MCX's 2026 calendar (see "MCX contract facts"): October 2026 options
+  expire Thu 15 Oct. Months outside the calendar (2027 on) are a flagged guess, and MCX holidays are not
+  modelled (`options.HOLIDAYS` is empty - fill it in).
   Rolled to next month when 5 or fewer days remain. No option-chain
   feed exists: the strike is left to you (pick the ITM strike whose delta is in range).
 - **Sizing (changed 2026-09-30):** no equity math any more. You set `MCX_CRUDEOIL_LOT_SIZE` and/or
@@ -304,8 +352,8 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
   from a 1% risk budget: pick the lot count so the loss at your real stop is acceptable.
   `MCX_NATURALGAS_LOT_SIZE` and `MCX_NATURALGASM_LOT_SIZE` (mini) are loaded and validated but **reserved**:
   nothing reads them (crude only).
-  Whether MCX lists options on the mini contract is not checked here - confirm before relying on
-  `MCX_CRUDEOILM_LOT_SIZE`; the maths only assumes 10 bbl a lot.
+  MCX does list options on the mini contract (`CRUDEOILM`, underlying the 10 bbl mini futures, per the
+  leaflet), so `MCX_CRUDEOILM_LOT_SIZE` is usable; the maths uses 10 bbl a lot.
 - **Not automated (on `checklist`):** time-spread and dealer-gamma filters, the retest entry,
   the real stop, FX/RBI and geopolitical aborts, OI pinning haircut. The pre-release
   `scorecard` is informational: the runbook doesn't say how a miss changes the trade.

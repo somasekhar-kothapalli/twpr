@@ -6,7 +6,7 @@ from app import telegram_bot as tb
 from app.signal_engine import build_signal
 from app.utils.common import fmt, now_ist
 
-MARKET = {"atr_20": 4.839, "ovx": 53.74, "cl1_cl2": 2.24, "crack_321": 61.6, "brent_wti": 6.8}
+MARKET = {"atr_20": 4.839, "ovx": 53.74, "wti": 89.7, "cl1_cl2": 2.24, "crack_321": 61.6, "brent_wti": 6.8}
 REFERENCE = {
     "release_date": "23-09-2026",
     "crude_consensus_mb": -0.6, "gasoline_consensus_mb": 0.1, "distillate_consensus_mb": -0.6,
@@ -34,6 +34,8 @@ def test_regime_1_message_has_everything_needed_to_act():
         "Option: delta 0.80-0.85 (OVX 53.7 above 35, deep ITM) | expiry 15-10-2026 (22d)",
         "Expected WTI move (beta_vol): -2.01 USD = -168 INR on MCX (USD/INR 84.00, yfinance), 0.90 USD per mb",
         "Anchor (0.15-0.30 USD per mb): -0.33 to -0.67 USD = -28 to -56 INR - beta_vol is outside it",
+        "MCX limit: futures band 4% = INR 301 (on ~INR 7,535/bbl); the beta_vol move is 2.2% of price = 56% of the band; "
+        "the limit widens to 6% then 9%",
         "CRUDEOIL: 2 lots x 100 bbl | INR lost if the option stop is hit, by futures stop:",
         "$0.18: 2,495 | $0.25: 3,465 | $0.35: 4,851",
         "CRUDEOILM: 3 lots x 10 bbl | INR lost if the option stop is hit, by futures stop:",
@@ -60,6 +62,12 @@ def test_regime_2_says_targets_are_chart_levels():
     text = tb.format_signal(signal(cushing_change_mb=-1.5, cushing_level_mb=40.0))
     assert text.splitlines()[0] == "🟢 TWPR SIGNAL - Regime 2 Bullish: CALL ITM"
     assert "Cushing: -1.500 mb (contradicts)" in text and "Targets: chart levels" in text and "Expected WTI move" not in text
+
+
+def test_an_assumed_expiry_is_marked_in_the_message():
+    text = tb.format_signal(signal(release_date="23-12-2026", crude_change_mb=12.0))
+    assert "expiry 15-01-2027" in text and "ASSUMED - check the chain" in text
+    assert "ASSUMED" not in tb.format_signal(signal())          # a calendar month is not flagged
 
 
 def test_missing_lot_count_says_how_to_set_it():

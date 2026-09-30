@@ -45,6 +45,7 @@ def test_reference_week_is_regime_1_bearish_put_with_deep_itm_delta():
     assert c["cushing_contradicts"] is False and c["cushing_multiplier"] == pytest.approx(1.391, abs=1e-3)
     assert s["option"]["ovx_deepened"] is True and (s["option"]["delta_low"], s["option"]["delta_high"]) == (0.80, 0.85)
     assert (s["option"]["expiry_date"], s["option"]["days_to_expiry"], s["option"]["rolled"]) == ("15-10-2026", 22, False)
+    assert s["option"]["expiry_source"] == "mcx_calendar" and not any("GUESS" in line for line in s["checklist"])
     assert s["schedule"]["release_ist"] == "20:00" and s["schedule"]["hard_exit_ist"] == "22:30"
 
 
@@ -53,6 +54,10 @@ def test_expected_move_is_negative_for_a_build_and_flags_the_sanity_band():
     assert move["wti_usd"] == pytest.approx(-2.005, abs=0.01) and move["mcx_inr"] == -168   # at 84.0
     assert (move["anchor_low_usd"], move["anchor_high_usd"]) == (-0.33, -0.67)                # 0.15 / 0.30 per mb
     assert (move["anchor_low_inr"], move["anchor_high_inr"]) == (-28, -56)
+    band = move["band"]                                                                       # WTI 89.7 x 84 INR
+    assert (band["futures_price_inr"], band["band_inr"], band["near_band"]) == (7535, 301, False)
+    assert band["move_share_of_band"] == pytest.approx(0.56, abs=0.01)
+    assert signal(market={**MARKET, "wti": None})["expected_move"]["band"] is None            # no price: no band
     assert move["per_mb_usd"] > 0.30 and move["sanity_ok"] is False        # OVX 54 pushes it past 0.15-0.30
     calm = signal(market={**MARKET, "ovx": 30.0, "atr_20": 2.0})
     assert calm["expected_move"]["sanity_ok"] is True and calm["option"]["ovx_deepened"] is False
@@ -477,3 +482,10 @@ def test_main_unexpected_error_alerts_telegram(monkeypatch, tmp_path):
     monkeypatch.setattr(se, "build_signal", lambda *a, **k: 1 / 0)
     assert se.main(["--allow-stale"]) == 1
     assert alerts and "ZeroDivisionError" in alerts[0][1]
+
+
+def test_an_expiry_outside_the_mcx_calendar_is_flagged_first_on_the_checklist():
+    s = build_signal({**INPUTS, "release_date": "23-12-2026", "crude_change_mb": 12.0},
+                     {**MARKET, "fetched_at": "23-12-2026 18:00"}, SIGMA, 84.0, "fallback", analyse=stub())
+    assert s["signal"]["action"] == "trade" and s["option"]["expiry_source"] == "assumed_19th"
+    assert "GUESS" in s["checklist"][0] and s["option"]["expiry_date"] in s["checklist"][0]
