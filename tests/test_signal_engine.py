@@ -7,8 +7,8 @@ import pytest
 
 from app import model
 from app import signal_engine as se
-from app.signal_engine import (InputError, build_signal, fetch_usd_inr, generate_analysis, load_equity, load_inputs,
-                               load_market, load_sigma)
+from app.signal_engine import (InputError, build_signal, fetch_usd_inr, generate_analysis, load_inputs,
+                               load_lot_sizes, load_market, load_sigma)
 
 # The 23-09-2026 report: crude +3.569 vs consensus, Cushing +2.266 at a 23.748 mb level, OVX 53.7.
 INPUTS = {
@@ -28,8 +28,8 @@ def stub(text="analysis", name="groq/test"):
     return lambda prompt: (text, name)
 
 
-def signal(sigma=SIGMA, market=None, equity=None, max_lots=None, analyse=None, **overrides):
-    return build_signal({**INPUTS, **overrides}, market or MARKET, sigma, 84.0, "fallback", equity, max_lots,
+def signal(sigma=SIGMA, market=None, lots=None, analyse=None, **overrides):
+    return build_signal({**INPUTS, **overrides}, market or MARKET, sigma, 84.0, "fallback", lots,
                         analyse=analyse or stub(), generated_at="23-09-2026 20:02")
 
 
@@ -125,13 +125,15 @@ def test_scorecard_reads_the_thresholds_and_keeps_unknowns_none():
     assert card == {"backwardation": False, "crack_321": None, "brent_wti": True, "api_prepositioned": False}
 
 
-def test_sizing_uses_the_mid_delta_and_the_lot_cap():
-    s = signal(equity=1_000_000.0)
-    assert s["sizing"]["risk_inr"] == 10_000 and s["sizing"]["delta_used"] == 0.825
-    assert s["sizing"]["lots_by_futures_stop_usd"] == {"0.18": 8, "0.25": 5, "0.35": 4}     # at USD/INR 84
-    capped = signal(equity=1_000_000.0, max_lots=1)["sizing"]
-    assert set(capped["lots_by_futures_stop_usd"].values()) == {1} and capped["max_lots"] == 1
-    assert signal()["sizing"] is None
+def test_sizing_shows_what_your_lots_risk_at_the_mid_delta():
+    s = signal(lots={"CRUDEOIL": 2, "CRUDEOILM": 3})      # OVX 54: delta 0.80-0.85, mid 0.825; USD/INR 84
+    assert s["sizing"]["delta_used"] == 0.825
+    assert s["sizing"]["contracts"] == {
+        "CRUDEOIL": {"lots": 2, "barrels_per_lot": 100,
+                     "risk_inr_by_futures_stop_usd": {"0.18": 2495, "0.25": 3465, "0.35": 4851}},
+        "CRUDEOILM": {"lots": 3, "barrels_per_lot": 10,
+                      "risk_inr_by_futures_stop_usd": {"0.18": 374, "0.25": 520, "0.35": 728}}}
+    assert signal()["sizing"] is None                     # no lot count configured: nothing is invented
 
 
 def test_prompt_states_which_way_the_surprise_points():
@@ -291,19 +293,25 @@ def test_signal_records_which_sigma_method_set_the_gate():
     assert build_signal(INPUTS, MARKET, SIGMA, 84.0, "fallback", analyse=stub(), sigma_method="std")["calculations"]["sigma_method"] == "std"
 
 
-def test_account_settings_are_optional_but_never_silently_wrong(monkeypatch):
-    monkeypatch.delenv("ACCOUNT_EQUITY_INR", raising=False)
-    monkeypatch.delenv("MAX_LOTS", raising=False)
-    assert load_equity() == (None, None)
-    monkeypatch.setenv("ACCOUNT_EQUITY_INR", "1,000,000")
-    monkeypatch.setenv("MAX_LOTS", "1")
-    assert load_equity() == (1_000_000.0, 1)
-    monkeypatch.setenv("ACCOUNT_EQUITY_INR", "# your capital in INR")      # dotenv placeholder = unset
-    assert load_equity()[0] is None
-    for bad in ("ten lakh", "-5", "0"):
-        monkeypatch.setenv("ACCOUNT_EQUITY_INR", bad)
-        with pytest.raises(InputError, match="ACCOUNT_EQUITY_INR"):
-            load_equity()
+def test_lot_settings_are_optional_but_never_silently_wrong(monkeypatch):
+    names = ("MCX_CRUDEOIL_LOT_SIZE", "MCX_CRUDEOILM_LOT_SIZE", "MCX_NATURALGAS_LOT_SIZE",
+             "MCX_NATURALGASM_LOT_SIZE")
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    assert load_lot_sizes() == {"CRUDEOIL": None, "CRUDEOILM": None, "NATURALGAS": None, "NATURALGASM": None}
+    monkeypatch.setenv("MCX_CRUDEOIL_LOT_SIZE", "2")
+    monkeypatch.setenv("MCX_CRUDEOILM_LOT_SIZE", "10")
+    monkeypatch.setenv("MCX_NATURALGAS_LOT_SIZE", "1")
+    monkeypatch.setenv("MCX_NATURALGASM_LOT_SIZE", "5")
+    assert load_lot_sizes() == {"CRUDEOIL": 2, "CRUDEOILM": 10, "NATURALGAS": 1, "NATURALGASM": 5}
+    monkeypatch.setenv("MCX_CRUDEOIL_LOT_SIZE", "# lots per signal")       # dotenv placeholder = unset
+    assert load_lot_sizes()["CRUDEOIL"] is None
+    for name in names:
+        for bad in ("two", "1.5", "0", "-1"):
+            monkeypatch.setenv(name, bad)
+            with pytest.raises(InputError, match=name):
+                load_lot_sizes()
+        monkeypatch.delenv(name)
 
 
 # ----------------------------------------------------- external calls (all stubbed)
@@ -425,8 +433,10 @@ def patch_main(monkeypatch, tmp_path):
     monkeypatch.setattr(se, "DATA_DIR", tmp_path)
     monkeypatch.setattr(se, "load_dotenv", lambda *a, **k: None)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    monkeypatch.delenv("ACCOUNT_EQUITY_INR", raising=False)
-    monkeypatch.delenv("MAX_LOTS", raising=False)
+    monkeypatch.delenv("MCX_CRUDEOIL_LOT_SIZE", raising=False)
+    monkeypatch.delenv("MCX_CRUDEOILM_LOT_SIZE", raising=False)
+    monkeypatch.delenv("MCX_NATURALGAS_LOT_SIZE", raising=False)
+    monkeypatch.delenv("MCX_NATURALGASM_LOT_SIZE", raising=False)
     monkeypatch.delenv("SIGMA_METHOD", raising=False)
     fake_yfinance(monkeypatch, price=84.0)
     alerts, recorded = [], []
@@ -437,7 +447,7 @@ def patch_main(monkeypatch, tmp_path):
 
 def test_main_writes_signal_json_records_the_week_and_sends_nothing(monkeypatch, tmp_path):
     alerts, recorded = patch_main(monkeypatch, tmp_path)
-    monkeypatch.setenv("ACCOUNT_EQUITY_INR", "1000000")
+    monkeypatch.setenv("MCX_CRUDEOIL_LOT_SIZE", "1")
     write(tmp_path)
     assert se.main(["--allow-stale"]) == 0
     saved = json.loads((tmp_path / "signal.json").read_text(encoding="utf-8"))

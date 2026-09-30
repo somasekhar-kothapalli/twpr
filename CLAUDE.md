@@ -294,10 +294,18 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
   unconfirmed, and MCX holidays are not modelled (`options.HOLIDAYS` is empty - fill it in).
   Rolled to next month when 5 or fewer days remain. No option-chain
   feed exists: the strike is left to you (pick the ITM strike whose delta is in range).
-- **Sizing:** `ACCOUNT_EQUITY_INR` (optional; unset -> `sizing: null`) x 1%, converted through
-  USD/INR and the mid delta, given as lots **per futures stop** ($0.18 / $0.25 / $0.35)
-  because the real stop (1.5 x 1-min ATR or beyond VWAP +/-1.5 sigma) comes from the chart.
-  `MAX_LOTS` caps it (runbook: 1 lot for the first 3 weeks).
+- **Sizing (changed 2026-09-30):** no equity math any more. You set `MCX_CRUDEOIL_LOT_SIZE` and/or
+  `MCX_CRUDEOILM_LOT_SIZE` (whole numbers of lots you trade per signal; both unset -> `sizing: null` and
+  the message says how to set them) and `sizing.contracts` shows, per configured contract,
+  `risk_inr_by_futures_stop_usd`: what those lots lose if the option stop is hit,
+  `lots x futures stop x USD/INR x mid delta x barrels per lot` (CRUDEOIL 100 bbl, CRUDEOILM 10 bbl;
+  `options.CONTRACT_BARRELS`), for stops of $0.18 / $0.25 / $0.35 (the real
+  stop, 1.5 x 1-min ATR or beyond VWAP +/-1.5 sigma, comes from the chart). It no longer derives lots
+  from a 1% risk budget: pick the lot count so the loss at your real stop is acceptable.
+  `MCX_NATURALGAS_LOT_SIZE` and `MCX_NATURALGASM_LOT_SIZE` (mini) are loaded and validated but **reserved**:
+  nothing reads them (crude only).
+  Whether MCX lists options on the mini contract is not checked here - confirm before relying on
+  `MCX_CRUDEOILM_LOT_SIZE`; the maths only assumes 10 bbl a lot.
 - **Not automated (on `checklist`):** time-spread and dealer-gamma filters, the retest entry,
   the real stop, FX/RBI and geopolitical aborts, OI pinning haircut. The pre-release
   `scorecard` is informational: the runbook doesn't say how a miss changes the trade.
@@ -331,7 +339,7 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
 Sends `data/signal.json` (`format_signal` is pure and tested): regime and direction with the
 option, TLS / Z / sigma, the three surprises, Cushing (change, level, multiplier), API
 alignment, delta and expiry, expected move (and a warning when outside the sanity band),
-lots per futures stop (or how to enable sizing), the IST clock, the checklist and the
+the INR risk of your lot count (or how to set it), the IST clock, the checklist and the
 narrative. A stand-down sends only the TLS/Z line, the surprises and "No position this
 week."; missing optional data reads `N/A`/`unknown`, not a crash. Runs after `signal_engine`.
 

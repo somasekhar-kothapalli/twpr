@@ -68,7 +68,7 @@ Example: ₹14 stop × 100 = ₹1,400 risk/lot. On a ₹1,000,000 account,
 Max Risk = ₹10,000 → floor(10,000 / 1,400) = 7 lots.
 ```
 
-*Implementation note:* USD/INR is read live (yfinance, 84.0 fallback), not hardcoded — it was ≈ 95.9 on 2026-09-30, so the "₹83–84 per $1" figure above is stale. The real futures stop comes from the chart, so the signal gives lots **per futures stop** ($0.18 / $0.25 / $0.35) at the middle of the delta range, from `ACCOUNT_EQUITY_INR`; `MAX_LOTS` caps them (set 1 for §6). If no equity is configured, sizing is omitted rather than guessed. Lots can come out 0 on a small account; the code does not round that up to 1.
+*Implementation note:* USD/INR is read live (yfinance, 84.0 fallback), not hardcoded — it was ≈ 95.9 on 2026-09-30, so the "₹83–84 per $1" figure above is stale. The real futures stop comes from the chart, so the code no longer derives a lot count from a 1% budget (changed 2026-09-30). You set the lots you trade in `MCX_CRUDEOIL_LOT_SIZE` (1 for §6's validation window) and/or `MCX_CRUDEOILM_LOT_SIZE` (the 10 bbl mini contract) and the signal shows what those lots lose in INR if the option stop is hit, at futures stops of $0.18 / $0.25 / $0.35 and the middle of the delta range. If the lot count isn't set, nothing is shown rather than guessed. The 1% rule above is now a check you apply yourself: pick lots so the loss at your real stop is at most 1% of equity.
 ---
 
 ## 4. Regime Adaptations for MCX Options
@@ -123,8 +123,8 @@ The pipeline in this repo produces the pre-release inputs and the signal; the op
 | Delta target (0.60–0.70; 0.80–0.85 when OVX > 35, strictly above) | Automated |
 | Expiry gate (> 5 days) | Automated: option expiry = 2 business days before the 19th (Oct 2026 confirmed; other months and holidays unverified) |
 | ITM strike selection | **Manual**: no option-chain feed; pick the strike whose delta is in range |
-| USD → INR → premium stop, lot sizing | Automated per futures stop; needs `ACCOUNT_EQUITY_INR`; the real stop is read off the chart |
-| 1-lot cap for the validation window | `MAX_LOTS=1` in `.env` |
+| USD → INR → premium stop, INR risk of your lots | Automated per futures stop for the lots you set in `MCX_CRUDEOIL_LOT_SIZE`; the real stop is read off the chart, and the 1% check is yours |
+| 1-lot rule for the validation window | Set `MCX_CRUDEOIL_LOT_SIZE=1` in `.env` |
 | Limit-only entries, retest timing, 50% scale-out, 4-minute chop exit | **Manual** (listed on the signal's checklist; the chop timer is a reminder, not a watcher) |
 | INR basis abort, 50% geopolitical size-down | **Manual** checklist items |
 | Hard exit and time stop times | Automated (DST-aware), shown in the message; no alarm is sent |

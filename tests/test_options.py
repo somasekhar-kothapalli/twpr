@@ -39,17 +39,35 @@ def test_expiry_gate(release, expiry, days, rolled):
     assert options.pick_expiry(release) == {"expiry_date": expiry, "days_to_expiry": days, "rolled": rolled}
 
 
-def test_lots_match_the_runbook_worked_example():
-    # $0.25 stop at 84 INR = 21 -> x0.65 delta = 13.65 -> 1,365/lot; 10,000 risk -> 7 lots
-    assert options.lots_for_stop(1_000_000, 0.25, 84.0, 0.65) == 7
-    assert options.lots_for_stop(1_000_000, 0.25, 84.0, 0.65, max_lots=1) == 1
-    assert options.lots_for_stop(1_000_000, 0.25, 84.0, 0.65, max_lots=50) == 7
-    assert options.lots_for_stop(5_000, 0.35, 84.0, 0.85) == 0      # account too small: zero lots, not a forced 1
+def test_risk_matches_the_runbook_arithmetic():
+    # $0.25 stop at 84 INR = 21 -> x0.65 delta = 13.65 INR per bbl -> x100 bbl = 1,365 per lot (runbook: 1,400)
+    risk = options.sizing({"CRUDEOIL": 1}, 84.0, (0.60, 0.70))
+    assert risk["delta_used"] == 0.65
+    assert risk["contracts"]["CRUDEOIL"] == {"lots": 1, "barrels_per_lot": 100,
+                                            "risk_inr_by_futures_stop_usd": {"0.18": 983, "0.25": 1365, "0.35": 1911}}
 
 
-def test_wider_stops_mean_fewer_lots():
-    lots = options.sizing(1_000_000, 84.0, (0.60, 0.70))["lots_by_futures_stop_usd"]
-    assert lots["0.18"] >= lots["0.25"] >= lots["0.35"] and lots["0.35"] > 0
+def test_ten_mini_lots_carry_the_same_risk_as_one_full_lot():
+    both = options.sizing({"CRUDEOIL": 1, "CRUDEOILM": 10}, 84.0, (0.60, 0.70))["contracts"]
+    assert both["CRUDEOILM"]["barrels_per_lot"] == 10
+    assert both["CRUDEOILM"]["risk_inr_by_futures_stop_usd"] == both["CRUDEOIL"]["risk_inr_by_futures_stop_usd"]
+
+
+def test_only_the_configured_contracts_appear():
+    assert list(options.sizing({"CRUDEOILM": 3}, 84.0, (0.80, 0.85))["contracts"]) == ["CRUDEOILM"]
+
+
+def test_risk_scales_with_lots_and_with_the_rupee():
+    two = options.sizing({"CRUDEOIL": 2}, 84.0, (0.60, 0.70))["contracts"]["CRUDEOIL"]["risk_inr_by_futures_stop_usd"]
+    assert two == {"0.18": 1966, "0.25": 2730, "0.35": 3822}
+    weak = options.sizing({"CRUDEOIL": 1}, 96.0, (0.60, 0.70))["contracts"]["CRUDEOIL"]["risk_inr_by_futures_stop_usd"]["0.25"]
+    assert weak == int(round(0.25 * 96.0 * 0.65 * 100))
+
+
+def test_deeper_delta_risks_more_per_lot():
+    def at(delta):
+        return options.sizing({"CRUDEOIL": 1}, 84.0, delta)["contracts"]["CRUDEOIL"]["risk_inr_by_futures_stop_usd"]["0.25"]
+    assert at((0.80, 0.85)) > at((0.60, 0.70))
 
 
 def test_release_clock_follows_us_daylight_saving():

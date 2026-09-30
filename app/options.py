@@ -1,10 +1,9 @@
 """MCX options mechanics from docs/WPSR_MCX_OPTIONS_RUNBOOK.md. Pure: no I/O, no clock.
 
-Strike (ITM delta), expiry gate, lot sizing and the release-day clock. The runbook says
+Strike (ITM delta), expiry gate, the loss per lot and the release-day clock. The runbook says
 its numbers are illustrative, not backtested: the FX conversion and the expiry day below
 are assumptions to confirm against your live option chain.
 """
-import math
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -22,8 +21,8 @@ OPTION_LEAD_BUSINESS_DAYS = 2  # ...and the OPTIONS expire this many business da
 HOLIDAYS = frozenset()         # MCX trading holidays (datetime.date). Empty: only weekends are skipped, so a
                                # holiday near expiry would shift the real date by a day. Fill in from the MCX list.
 ROLL_WITHIN_DAYS = 5           # runbook: current month only if MORE than 5 days remain
-LOT_BARRELS = 100              # MCX crude lot
-RISK_FRACTION = 0.01           # 1% of account equity per event
+CONTRACT_BARRELS = {"CRUDEOIL": 100, "CRUDEOILM": 10}   # barrels per lot: the exchange's contract sizes
+                               # (CRUDEOILM is the mini contract; confirm it is what you actually trade)
 STOP_BRACKET_USD = (0.18, 0.25, 0.35)   # runbook stop range: min $0.18-$0.35 on the futures
 
 RELEASE_ET = (10, 30)          # EIA WPSR, 10:30 AM New York time (DST-aware)
@@ -85,28 +84,25 @@ def pick_expiry(release_day):
             "rolled": rolled}
 
 
-def lots_for_stop(equity_inr, stop_usd, usd_inr, delta, max_lots=None):
-    """Lots so that hitting the option stop loses 1% of equity.
+def sizing(lots_by_contract, usd_inr, delta_range):
+    """What the lots you trade lose in INR if the option's stop is hit, per contract and for each
+    futures stop in the runbook's $0.18-$0.35 bracket, at the middle of the delta range:
 
-        option stop (INR) = futures stop (USD) * USD/INR * delta
-        lots = floor(equity * 1% / (option stop * 100 bbl))
-    """
-    risk_per_lot = stop_usd * usd_inr * delta * LOT_BARRELS
-    lots = math.floor(equity_inr * RISK_FRACTION / risk_per_lot)
-    return min(lots, max_lots) if max_lots is not None else lots
+        option stop (INR) = futures stop (USD) * USD/INR * delta;  loss = lots * option stop * barrels per lot
 
-
-def sizing(equity_inr, usd_inr, delta_range, max_lots=None):
-    """Risk budget and lots for each stop in the runbook's $0.18-$0.35 bracket, at the mid delta.
-    The real stop (1.5 x 1-min ATR, or outside VWAP +/-1.5 sigma) is read off the chart."""
+    `lots_by_contract` is {"CRUDEOIL": n, "CRUDEOILM": m} for the contracts you configured. The lot
+    counts are your choice; the real stop (1.5 x 1-min ATR, or outside VWAP +/-1.5 sigma) is read off
+    the chart, so the loss is shown for three of them."""
     delta = round(sum(delta_range) / 2, 3)
     return {
-        "equity_inr": equity_inr,
-        "risk_inr": round(equity_inr * RISK_FRACTION),
         "delta_used": delta,
-        "max_lots": max_lots,
-        "lots_by_futures_stop_usd": {f"{stop:.2f}": lots_for_stop(equity_inr, stop, usd_inr, delta, max_lots)
-                                     for stop in STOP_BRACKET_USD},
+        "contracts": {
+            name: {"lots": lots, "barrels_per_lot": CONTRACT_BARRELS[name],
+                   "risk_inr_by_futures_stop_usd": {
+                       f"{stop:.2f}": int(round(lots * stop * usd_inr * delta * CONTRACT_BARRELS[name]))
+                       for stop in STOP_BRACKET_USD}}
+            for name, lots in lots_by_contract.items()
+        },
     }
 
 

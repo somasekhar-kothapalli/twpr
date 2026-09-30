@@ -6,7 +6,7 @@ after the print). Telegram is used for ERRORS only here; telegram_bot.py sends t
 
 The model (docs/WPSR_WEDNESDAY_RUNBOOK.md section 3 and the MCX options adaptation):
 TLS -> Z-score gate (|Z| >= 1.25) -> Cushing check (contradiction routes to Regime 2)
--> regime -> expected move -> ITM option, expiry gate and 1%-risk lot sizing.
+-> regime -> expected move -> ITM option, expiry gate and the INR risk of your lot count.
 The maths is in app/model.py and app/options.py (pure); this file loads, validates and
 assembles. The Groq narrative only writes prose: it can never touch the trade, and if it
 fails the signal still ships with analysis "".
@@ -188,20 +188,27 @@ def load_market(data_dir=None, today=None, allow_stale=False):
     return market
 
 
-def load_equity():
-    """ACCOUNT_EQUITY_INR as a positive float, or None if unset. MAX_LOTS likewise (int)."""
-    def read(name, cast):
+LOT_SETTINGS = {"CRUDEOIL": "MCX_CRUDEOIL_LOT_SIZE", "CRUDEOILM": "MCX_CRUDEOILM_LOT_SIZE",
+                "NATURALGAS": "MCX_NATURALGAS_LOT_SIZE", "NATURALGASM": "MCX_NATURALGASM_LOT_SIZE"}
+
+
+def load_lot_sizes():
+    """{contract: lots or None}: the lots you trade per signal, from MCX_CRUDEOIL_LOT_SIZE,
+    MCX_CRUDEOILM_LOT_SIZE (the mini contract, 10 bbl a lot), MCX_NATURALGAS_LOT_SIZE and
+    MCX_NATURALGASM_LOT_SIZE. Whole numbers of at least 1, or None if unset. The two natural gas values
+    are reserved for a future setup: nothing reads them yet."""
+    def read(name):
         raw = env(name)
         if raw is None:
             return None
         try:
-            value = cast(raw.replace(",", ""))
+            value = int(raw)
         except ValueError:
-            raise InputError("Invalid setting", f"{name}={raw!r} is not a number") from None
-        if value <= 0:
-            raise InputError("Invalid setting", f"{name} must be positive, got {raw!r}")
+            raise InputError("Invalid setting", f"{name}={raw!r} is not a whole number of lots") from None
+        if value < 1:
+            raise InputError("Invalid setting", f"{name} must be at least 1, got {raw!r}")
         return value
-    return read("ACCOUNT_EQUITY_INR", float), read("MAX_LOTS", int)
+    return {contract: read(name) for contract, name in LOT_SETTINGS.items()}
 
 
 def sigma_method():
@@ -313,7 +320,7 @@ def scorecard(market, api_surprise):
     }
 
 
-def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, equity_inr=None, max_lots=None,
+def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
                  analyse=generate_analysis, generated_at=None, sigma_method="mad"):
     """The full signal.json payload from validated inputs, market data and sigma_forecast."""
     release_day = parse_release_date(inputs["release_date"])
@@ -356,8 +363,8 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, equity_inr=None
         low, high, deepened = options.target_delta(market["ovx"])
         option = {"delta_low": low, "delta_high": high, "ovx_deepened": deepened, "ovx": market["ovx"],
                   **options.pick_expiry(release_day)}
-        if equity_inr:
-            sizing = options.sizing(equity_inr, usd_inr, (low, high), max_lots)
+        if lots:   # {contract: lots} for the contracts you configured
+            sizing = options.sizing(lots, usd_inr, (low, high))
         if regime == 1:   # Regimes 2 and 3 target chart levels, not a modelled move
             usd = model.expected_move_usd(tls, beta, multiplier)
             anchor = model.anchor_move_usd(tls)
@@ -406,11 +413,12 @@ def main(argv=None):
         market = load_market(allow_stale=args.allow_stale)
         method = sigma_method()
         sigma, weeks = load_sigma(inputs["release_date"], method=method)
-        equity, max_lots = load_equity()
-        if equity is None:
-            logger.warning("ACCOUNT_EQUITY_INR not set - no lot sizing in the signal")
+        settings = load_lot_sizes()
+        lots = {contract: n for contract, n in settings.items() if n and contract in options.CONTRACT_BARRELS}
+        if not lots:
+            logger.warning("MCX_CRUDEOIL_LOT_SIZE / MCX_CRUDEOILM_LOT_SIZE not set - no lot count in the signal")
         usd_inr, source = fetch_usd_inr()
-        signal = build_signal(inputs, market, sigma, usd_inr, source, equity, max_lots, sigma_method=method)
+        signal = build_signal(inputs, market, sigma, usd_inr, source, lots=lots or None, sigma_method=method)
         write_json(SIGNAL_FILE, signal)
         record_week(inputs, inputs)   # this week's surprises join the history (no-op if already there)
         s, c = signal["signal"], signal["calculations"]

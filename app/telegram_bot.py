@@ -31,10 +31,13 @@ def _mb(value):
 
 def _format_sizing(sizing):
     if not sizing:
-        return ["Sizing: set ACCOUNT_EQUITY_INR in .env for a lot count"]
-    lots = " | ".join(f"${stop}: {n}" for stop, n in sizing["lots_by_futures_stop_usd"].items())
-    cap = f" (capped at {sizing['max_lots']})" if sizing["max_lots"] else ""
-    return [f"Risk 1% = INR {sizing['risk_inr']:,} | lots by futures stop{cap}:", f"  {lots}"]
+        return ["Lots: set MCX_CRUDEOIL_LOT_SIZE (or MCX_CRUDEOILM_LOT_SIZE) in .env to see what your lots risk"]
+    lines = []
+    for name, block in sizing["contracts"].items():
+        risk = " | ".join(f"${stop}: {inr:,}" for stop, inr in block["risk_inr_by_futures_stop_usd"].items())
+        lines += [f"{name}: {block['lots']} lots x {block['barrels_per_lot']} bbl | INR lost if the option stop is hit, "
+                  "by futures stop:", f"  {risk}"]
+    return lines
 
 
 def format_signal(signal, replay_days=None):

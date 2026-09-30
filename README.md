@@ -101,7 +101,7 @@ adaptation) and writes `data/signal.json`: the total liquid surprise (TLS) and i
 Z-score against the last 12 weeks, the Cushing check, the regime (1 aligned, 2 fade,
 3 sell-the-fact, or stand down when |Z| < 1.25), the expected WTI / MCX move, the ITM
 option to buy (delta 0.60-0.70, or 0.80-0.85 when OVX is above 35), the expiry, lots for
-1% risk, the IST clock and a checklist of what only the chart can settle. The rules are
+the INR risk of your lot count, the IST clock and a checklist of what only the chart can settle. The rules are
 deterministic; the optional Groq paragraph is narrative only and never affects the trade.
 
 ```bash
@@ -114,8 +114,10 @@ python -m app.signal_engine --allow-stale  # replay older files
 `SIGMA_METHOD` (`mad`, the default, or `std`) sets how the Z-score's noise floor is measured;
 `mad` keeps one freak week from locking out real signals for 12 weeks.
 
-Set `ACCOUNT_EQUITY_INR` in `.env` for lot sizing (and `MAX_LOTS=1` for the runbook's
-first-three-weeks cap). Needs `GROQ_API_KEY` (and a `GROQ_MODEL` your account can use)
+Set `MCX_CRUDEOIL_LOT_SIZE` in `.env` (the lots you trade per signal; the runbook's
+validation window is 1) and the message shows what those lots lose in INR if the option stop is hit.
+`MCX_CRUDEOILM_LOT_SIZE` does the same for the mini contract (10 bbl a lot). `MCX_NATURALGAS_LOT_SIZE` and
+`MCX_NATURALGASM_LOT_SIZE` are reserved for a future natural gas setup. Needs `GROQ_API_KEY` (and a `GROQ_MODEL` your account can use)
 for the narrative, and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for alerts. All optional.
 
 ## Telegram alerts

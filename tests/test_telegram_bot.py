@@ -16,14 +16,14 @@ REFERENCE = {
 }
 
 
-def signal(analysis="Crude built more than expected; Cushing confirms.", sigma=1.5, equity=None, market=None, **overrides):
-    return build_signal({**REFERENCE, **overrides}, market or MARKET, sigma, 84.0, "yfinance", equity, None,
+def signal(analysis="Crude built more than expected; Cushing confirms.", sigma=1.5, lots=None, market=None, **overrides):
+    return build_signal({**REFERENCE, **overrides}, market or MARKET, sigma, 84.0, "yfinance", lots,
                         analyse=lambda p: (analysis, "groq/x" if analysis else "rule_based"),
                         generated_at="23-09-2026 20:02")
 
 
 def test_regime_1_message_has_everything_needed_to_act():
-    text = tb.format_signal(signal(equity=1_000_000.0))
+    text = tb.format_signal(signal(lots={"CRUDEOIL": 2, "CRUDEOILM": 3}))
     assert text.splitlines()[0] == "🔴 TWPR SIGNAL - Regime 1 Bearish: PUT ITM"
     for expected in (
         "Release 23-09-2026 (generated 23-09-2026 20:02 IST)",
@@ -34,8 +34,10 @@ def test_regime_1_message_has_everything_needed_to_act():
         "Option: delta 0.80-0.85 (OVX 53.7 above 35, deep ITM) | expiry 15-10-2026 (22d)",
         "Expected WTI move (beta_vol): -2.01 USD = -168 INR on MCX (USD/INR 84.00, yfinance), 0.90 USD per mb",
         "Anchor (0.15-0.30 USD per mb): -0.33 to -0.67 USD = -28 to -56 INR - beta_vol is outside it",
-        "Risk 1% = INR 10,000 | lots by futures stop:",
-        "$0.18: 8 | $0.25: 5 | $0.35: 4",
+        "CRUDEOIL: 2 lots x 100 bbl | INR lost if the option stop is hit, by futures stop:",
+        "$0.18: 2,495 | $0.25: 3,465 | $0.35: 4,851",
+        "CRUDEOILM: 3 lots x 10 bbl | INR lost if the option stop is hit, by futures stop:",
+        "$0.18: 374 | $0.25: 520 | $0.35: 728",
         "IST: print 20:00 | time stop 20:35 | hard exit 22:30 | chop exit 4 min",
         "Checklist:",
         "- Limit orders only on the option chain",
@@ -60,8 +62,8 @@ def test_regime_2_says_targets_are_chart_levels():
     assert "Cushing: -1.500 mb (contradicts)" in text and "Targets: chart levels" in text and "Expected WTI move" not in text
 
 
-def test_missing_equity_says_how_to_get_lot_sizing():
-    assert "set ACCOUNT_EQUITY_INR in .env" in tb.format_signal(signal())
+def test_missing_lot_count_says_how_to_set_it():
+    assert "Lots: set MCX_CRUDEOIL_LOT_SIZE (or MCX_CRUDEOILM_LOT_SIZE) in .env" in tb.format_signal(signal())
 
 
 def test_unknown_cushing_reads_unknown_not_a_crash():
@@ -74,7 +76,7 @@ def test_stand_down_says_no_trade_and_shows_no_trade_details():
     assert text.splitlines()[0] == "⚪ TWPR - STAND DOWN"
     assert "TLS +2.226 mb, Z +0.45 (sigma 5.000): inside the 1.25 sigma noise band." in text
     assert "No position this week." in text
-    for absent in ("Option:", "Checklist", "Expected WTI", "Cushing", "Risk 1%"):
+    for absent in ("Option:", "Checklist", "Expected WTI", "Cushing", "Lots:"):
         assert absent not in text
 
 
@@ -83,7 +85,7 @@ def test_no_narrative_means_no_empty_trailing_block():
 
 
 def test_replay_is_stamped_and_fits_telegrams_limit():
-    text = tb.format_signal(signal(equity=1_000_000.0), replay_days=7)
+    text = tb.format_signal(signal(lots={"CRUDEOIL": 2}), replay_days=7)
     assert text.splitlines()[0] == "🔁 REPLAY - data is 7 days old, NOT a live signal"
     assert len(text) < 4096
 
