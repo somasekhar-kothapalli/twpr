@@ -1,10 +1,6 @@
 {
-  "week_ending": "2026-09-25",
-  "report_date": "2026-09-29",
+  "release_date": "29-09-2026",
   "api_crude_mb": 1.019,
-  "api_cushing_mb": 2.08,
-  "api_gasoline_mb": -2.16,
-  "api_distillate_mb": -2.16,
-  "source": "tradingeconomics.com",
-  "released_at": "2026-09-29T23:44:42.220818+00:00"
+  "crude_source": "tradingeconomics",
+  "fetched_at": "30-09-2026 19:18"
 }
