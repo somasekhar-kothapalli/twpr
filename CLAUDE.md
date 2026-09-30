@@ -77,6 +77,7 @@ python -m app.run all --replay 23-09-2026          # a past release end to end (
 python -m app.pre_brief --print                    # the pre-print brief, shown instead of sent
 python -m app.watch --dry-run                      # the reminder times for today's signal
 python -m app.journal fill ...                     # log a fill by hand;  path / show: post-print prices and statistics
+python -m app.crude_recorder [--date D | --seed-journal | --show]   # crude: every Wednesday's decision + price path
 python -m app.ng_recorder [--date D | --backfill | --show]   # natural gas storage record (v0.2, record only)
 
 python -m pytest tests -q                          # offline suite (default)
@@ -463,6 +464,22 @@ week."; missing optional data reads `N/A`/`unknown`, not a crash. Runs after `si
   `REPLAY - data is N days old, NOT a live signal`. Missing/corrupt file -> error alert too.
 - Windows consoles are cp1252: never `print()` this text (emoji raise `UnicodeEncodeError`);
   the script only logs, and `setup_logging` forces UTF-8.
+
+### `app/crude_recorder.py` — every Wednesday, traded or not
+
+Writes `data/crude_record.json` (`CRUDE_RECORD_FILE`), one record per release: the decision (TLS, Z, demeaned Z, sigma,
+regime, action/reason, surprises, Cushing status, API surprise, OVX/ATR), the afternoon market snapshot and WTI's price
+path at 0/1/2/5/10/15/30/60 minutes after the 10:30 ET print (Yahoo 1-minute bars, kept ~7 days, via `journal`'s
+`fetch_print_bars`/`path_from_bars`), plus `aligned_moves` (each move times the direction the surprise implies: positive =
+WTI moved the way the surprise says). **Why:** the edge is unproven and only about one week in four clears the gate
+(~10 trades a year), far too few to test it; but every Wednesday yields a TLS and a move, so all ~50 weeks a year can
+test whether the surprise predicts direction. `--show` prints each week, then hit rate, mean aligned move and the slope
+in USD per mb (against the 0.15-0.30 anchor) at +2/5/15/30/60 minutes for all weeks and for weeks with |Z| >= 1.25.
+Fewer than about 20 weeks is not evidence. It reads the signal file (else the surprise-history row, whose TLS uses the
+investing.com panel and so differs slightly from the live one), never changes a decision, exits 0 when the signal is
+older than 2 days and there is nothing new, and alerts Telegram only on failure. `--seed-journal` copies paths already
+logged with `journal path` (23-09-2026 is seeded). Workflow `twpr_crude_record.yml`: Wed and Thu 17:30 UTC (23:00 IST,
+after the hard exit in both summer and winter). `merge_records` (in `common.py`) never lets a poorer rerun erase data.
 
 ### `app/ng_recorder.py`, `app/utils/ng_storage.py` — natural gas storage record (v0.2, record only)
 

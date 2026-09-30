@@ -23,7 +23,8 @@ from dotenv import load_dotenv
 from app.market_data import NEW_YORK, PRINT_ET
 from app.scraper.sources import SOURCE_NAMES, scraper_for, slug_for
 from app.scraper.utils.calendar import parse_date, row_for_release
-from app.utils.common import DATE_FORMAT, NG_RECORD_FILE, ROOT, fmt_ts, now_ist, setup_logging, write_json
+from app.utils.common import (DATE_FORMAT, NG_RECORD_FILE, ROOT, fmt_ts, merge_records as merge, now_ist,
+                              setup_logging, write_json)
 from app.utils.ng_storage import fetch_storage
 from app.utils.telegram import send_exception
 
@@ -42,17 +43,6 @@ MAX_5M_DAYS = 55     # and 5-minute bars for about 60 days
 def load(path=None):
     path = path or NG_RECORD_FILE
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"records": {}}
-
-
-def merge(old, new):
-    """`new` over `old`, but a None (or empty dict) in `new` never erases something already recorded, so a
-    later run that got less data than an earlier one cannot make the record worse."""
-    if not isinstance(old, dict) or not isinstance(new, dict):
-        return old if new is None else new
-    merged = dict(old)
-    for key, value in new.items():
-        merged[key] = merge(old.get(key), value) if key in old else value
-    return merged
 
 
 def print_time(release_date):

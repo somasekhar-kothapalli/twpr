@@ -177,6 +177,7 @@ sequenceDiagram
 |---|---|---|
 | `twpr_pre.yml` | Wed 13:30 | `app.run pre` |
 | `twpr_print.yml` | Wed 14:30, 14:31, 14:32 | Skip if today's signal exists; redo pre if consensus missing; `app.run print` |
+| `twpr_crude_record.yml` | Wed and Thu 17:30 | Crude weekly recorder: every release's decision and WTI price path, traded or not (records only) |
 | `twpr_ng_record.yml` | Thu 17:00 | Natural gas storage recorder (records only, see below) |
 
 - Jobs use `environment: production`; put secrets and variables in that GitHub environment (and do not add required reviewers, which would block the unattended run).
@@ -206,6 +207,7 @@ Every file is written by exactly one script and read by the engine. File names l
 | `surprise_history.json` | `surprise_history` | weekly surprises; sets sigma; the engine appends each live week |
 | `signal.json` | `signal_engine` | the decision, option, expected move, sizing, schedule, checklist |
 | `journal.json` | `journal` | your fills and post-print price paths (local only, never in CI) |
+| `crude_record.json` | `crude_recorder` | every Wednesday: the decision (TLS, Z, regime) and WTI's path 0-60 minutes after the print |
 | `ng_record.json` | `ng_recorder` | natural gas storage prints and price paths (record only) |
 
 Consensus and actuals must share one release date; the API report must be the Tuesday before; files older than 2 days are refused unless `--allow-stale`.
@@ -274,6 +276,7 @@ python -m app.surprise_history --backfill   # one-off: past weekly surprises
 python -m app.journal fill ...              # log a fill; slippage and estimated net
 python -m app.journal path                  # WTI at 0/1/2/5/10/15/30/60 min after the print
 python -m app.journal show                  # wins, net, slippage, move by minute
+python -m app.crude_recorder --show         # every recorded week: does the surprise predict direction, and how much per mb
 ```
 
 `run` executes each stage as its own process and stops at the first failure with a Telegram alert naming what was skipped.

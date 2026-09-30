@@ -18,7 +18,7 @@ Nothing in v0.1 places, changes or cancels an order, and nothing connects to a b
 | **MCX mechanics** | Contract sizes, 2026 holidays, the evening-session check, session close and the hard exit capped an hour before it (23:30 summer / 23:55 winter), the 4% futures band against the expected move, devolution avoided by never holding to expiry. |
 | **Sizing** | You set the lots (`MCX_CRUDEOIL_LOTS`, `MCX_CRUDEOILM_LOTS`); the signal shows what they lose in INR at three futures stops. No equity maths. |
 | **Delivery** | The signal alert, a pre-print brief (how big a surprise the model needs), Telegram failure alerts from every script, time reminders (`watch`). |
-| **Record** | `journal`: your fills, slippage against your intended price, estimated net P&L, and WTI's path after each print. `surprise_history` grows by itself each week. |
+| **Record** | `journal`: your fills, slippage against your intended price, estimated net P&L, and WTI's path after each print. `surprise_history` grows by itself each week. `crude_recorder` writes every Wednesday's decision and price path automatically (traded or not), so the surprise-versus-move relationship can be measured on all weeks, not only the traded ones. |
 | **Operation** | `python -m app.run pre` / `print --watch` / `all --replay DATE`; each stage stops the chain on failure. |
 | **Docs** | `CLAUDE.md`, `README.md`, the two runbooks (with implementation notes), `MARKET_FACTORS.md`, the MCX contract facts. |
 
