@@ -128,7 +128,7 @@ alerts Telegram if it fails. Configure `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_I
 ## Where the URLs live
 
 All slugs are in `app/scraper/sources.py`, keyed by indicator name (`eia_crude`,
-`api_cushing`, ...) and site. Fix a moved URL or add a site there; nothing else
+`api_crude`, ...) and site. Fix a moved URL or add a site there; nothing else
 holds a URL. Check they still work with:
 
 ```bash

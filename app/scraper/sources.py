@@ -37,11 +37,8 @@ INDICATORS = {
         "tradingeconomics": "united-states/api-crude-oil-stock-change",
         "investing": "api-weekly-crude-stock-656",
     },
-    # investing.com's API cushing/gasoline/distillate events (1656/657/1035) are dead:
-    # newest rows are 2016/2022, served without error. Do not re-add them.
-    "api_cushing": {"tradingeconomics": "united-states/api-cushing-number"},
-    "api_gasoline": {"tradingeconomics": "united-states/api-gasoline-stocks"},
-    "api_distillate": {"tradingeconomics": "united-states/api-distillate-stocks"},
+    # The API's cushing/gasoline/distillate are deliberately NOT here (paywalled at the source; the
+    # tradingeconomics copies lag; investing.com's events for them are dead). Do not re-add.
 }
 
 

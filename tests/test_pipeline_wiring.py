@@ -57,8 +57,7 @@ def test_data_files_live_in_the_repo_data_dir():
 CONSENSUS_OK = {"release_date": "30-09-2026", "crude_consensus_mb": -1.6, "gasoline_consensus_mb": -1.4,
                 "distillate_consensus_mb": -0.7, "crude_previous_mb": 2.415, "crude_source": "tradingeconomics",
                 "gasoline_source": "tradingeconomics", "distillate_source": "tradingeconomics"}
-API_OK = {"release_date": "29-09-2026", "api_crude_mb": 1.25, "api_cushing_mb": -0.684,
-          "api_gasoline_mb": 1.0, "api_distillate_mb": 2.0}
+API_OK = {"release_date": "29-09-2026", "api_crude_mb": 1.25, "crude_source": "tradingeconomics"}
 EIA_OK = {"release_date": "30-09-2026", "crude_change_mb": -0.391, "cushing_change_mb": -0.684,
           "gasoline_change_mb": 1.269, "distillate_change_mb": 2.087, "refinery_util_change_pct": -2.8,
           "source": "tradingeconomics", "won_race": True}

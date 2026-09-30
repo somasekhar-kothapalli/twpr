@@ -133,35 +133,24 @@ carries from a timeout. Both pipeline scripts use it — don't re-implement the 
 
 ### `app/api_monitor.py` — the API report
 
-Writes `data/api_report.json`: `release_date`, `api_crude_mb`, `api_cushing_mb`,
-`api_gasoline_mb`, `api_distillate_mb`, `crude_source`, `cushing_source`,
-`gasoline_source`, `distillate_source`, `fetched_at` (IST, `DD-MM-YYYY HH:MM`). All
-actuals; no consensus exists for this report. Published Tue ~16:30 ET (Wed ~02:00
-IST); without `--once` it polls every 5 min for up to 4 h. Nothing is written unless
-all four fields are valid.
+Writes `data/api_report.json`: `release_date`, `api_crude_mb`, `crude_source`, `fetched_at` (IST,
+`DD-MM-YYYY HH:MM`). **Crude only.** The actual crude change; no consensus exists for this report.
+Published Tue ~16:30 ET (Wed ~02:00 IST); without `--once` it polls every 5 min for up to 4 h.
+Nothing is written unless crude is valid.
 
-- **Crude** is a dated row on both sites, raced like the consensus.
-- **Cushing / gasoline / distillate exist only on TE**, as an **undated, 2-decimal
-  "Related" snapshot** (`parse_related_table`); investing.com's events for them are
-  dead (see `sources.py`). Reading that blind could silently return last week's
-  numbers, so it is taken from the **same page load** as the dated crude row
-  (`fetch_with_soup`) and accepted only if its crude value matches that row's actual
-  (`legs_from_snapshot`, tolerance 0.0051). Consequently: those three legs are
-  2-decimal (crude keeps 3), and an explicit `--date` for anything but the latest
-  release is rejected for the legs ("different release").
+- **Why crude only:** the API's Cushing, gasoline and distillate figures are behind a paywall.
+  The tradingeconomics copies (an undated, 2-decimal "Related" snapshot) lag - live 2026-09-30
+  Cushing still showed last week's +2.08 while the other rows were new, and matching crude
+  proved nothing about them - and investing.com's events for them are dead (rows from 2016/2022).
+  Nothing downstream used them (Cushing comes from the EIA report itself), so they were removed
+  along with `parse_related_table` and their `sources.py` slugs. Do not re-add without a source
+  that is both paid-for and checked for freshness.
+- **Crude** is a dated row on both sites, raced like the consensus (`race`, one field).
+  Being a dated row it can be replayed with `--date` for any release still on the page.
 - Default target is the **latest release due** by today's UTC date (`latest_due_row`),
   not `pending_row`: after the report prints, the next-unreleased row jumps to next
   week, which would be wrong here. If that row hasn't printed it fails "not released
   yet" (and the poll retries).
-- **TE updates the four Related rows at different moments** (live 2026-09-30: crude, gasoline and
-  distillate were new but Cushing still showed last week's +2.08), so matching crude proves nothing
-  about the others. `legs_from_snapshot(..., last_report)` therefore also requires each leg's
-  "previous" to equal the previous week's `api_report.json` value for that leg (applied only when
-  that file is the release 4-10 days earlier); a leg that fails is rejected and the poll retries.
-  Without a last-week file there is no such check, so a first-ever run cannot catch it.
-- TE's gasoline and distillate both read **-2.16** for the 22-09 release. Checked against
-  TE's own news text: gasoline fell 2.16 mb, distillate 2.164 mb (the snapshot rounds to
-  2 dp), so the equal values are a coincidence, not a duplicated column.
 - TE and investing.com show the same API release a few minutes apart in `time`
   (02:30 vs 02:00 AM IST); the dates and values agree.
 
@@ -321,9 +310,6 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
 - **Live finding (2026-09-30):** the history's 12-08-2026 week has a +19.9 mb TLS. With the plain
   std dev sigma was ~8.3 mb; the default MAD gives ~5.8 on the 8 prior weeks, so a trade needs
   |TLS| above ~7 mb. The 23-09 reference week (TLS +2.23) **stands down** under any method.
-- **api_monitor replay limit:** replaying an old API report (`--date`) is rejected once TE's
-  "Related" snapshot has moved on to a newer release; the sim reuses the earlier
-  `api_report.json`.
 - **USD/INR** comes from `yfinance` (`INR=X`, 10 s timeout) or the fallback 84.0; a quote
   outside 50-150 is treated as bad data.
 - **Groq caveats:** the spec's default model `llama-3.3-70b-versatile` is 404 for this
@@ -393,10 +379,9 @@ on investing.com, no refinery utilisation on TE) — callers skip it.
   403s on back-to-back sessions. The offline tests in the same file run by default.
 - **investing.com events can be dead**: API Cushing/gasoline/distillate (1656/657/1035)
   return rows from 2016/2022 with no error, so they are deliberately absent from the
-  registry. The network health test asserts the newest released row is <= 21 days old.
-  Always check `release_date` freshness on a new slug. TE's `api_gasoline` and
-  `api_distillate` both read -2.16 for the 22-09 release; that is genuine (-2.16 and
-  -2.164 per TE's news text), just rounded to 2 dp.
+  registry (as are TE's API versions of the three: paywalled at source, and stale on TE).
+  The network health test asserts the newest released row is <= 21 days old.
+  Always check `release_date` freshness on a new slug.
 - investing.com slugs are `<event-name>-<event-id>` (e.g. `...-75`); TE slugs are
   `united-states/<indicator>`.
 - Some TE pages (API Cushing/gasoline/distillate) have **no calendar table**, only
@@ -445,8 +430,7 @@ them identical — put any new parsing here, not in a site file:
   (holiday guard); `latest_due_row(rows, today)` — the same without the age check;
   `pending_row(rows)`
   — earliest unreleased. `CalendarScraper.fetch_with_soup(slug)` returns `(page, soup)`
-  from one load for callers needing something outside the shared contract (TE's
-  `parse_related_table`).
+  from one load for callers needing something outside the shared contract.
 - `DATE_FORMAT = "%d-%m-%Y"` is the default for every date the scrapers take or
   return (`parse_date` / `format_date`). ISO `YYYY-MM-DD` input is also accepted
   but output is always DD-MM-YYYY. Compare dates as `date` objects, never as

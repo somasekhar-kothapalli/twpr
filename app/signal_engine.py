@@ -163,7 +163,6 @@ def load_inputs(data_dir=None, today=None, allow_stale=False):
         "distillate_change_mb": _num(eia, "distillate_change_mb"),
         "refinery_util_change_pct": _num(eia, "refinery_util_change_pct"),
         "api_crude_mb": _num(api, "api_crude_mb"),
-        "api_cushing_mb": _num(api, "api_cushing_mb"),
     }
     missing = [f"{key} ({path.name})" for key, path in MANDATORY if inputs[key] is None]
     if missing:

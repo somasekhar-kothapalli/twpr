@@ -12,7 +12,7 @@ REFERENCE = {
     "crude_consensus_mb": -0.6, "gasoline_consensus_mb": 0.1, "distillate_consensus_mb": -0.6,
     "crude_change_mb": 2.969, "cushing_change_mb": 2.266, "cushing_level_mb": 23.748,
     "gasoline_change_mb": -1.686, "distillate_change_mb": -0.428, "refinery_util_change_pct": -2.8,
-    "api_crude_mb": 1.786, "api_cushing_mb": 2.08,
+    "api_crude_mb": 1.786,
 }
 
 

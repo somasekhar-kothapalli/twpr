@@ -16,7 +16,7 @@ INPUTS = {
     "crude_consensus_mb": -0.6, "gasoline_consensus_mb": 0.1, "distillate_consensus_mb": -0.6,
     "crude_change_mb": 2.969, "cushing_change_mb": 2.266, "cushing_level_mb": 23.748,
     "gasoline_change_mb": -1.686, "distillate_change_mb": -0.428, "refinery_util_change_pct": -2.8,
-    "api_crude_mb": 1.786, "api_cushing_mb": 2.08,
+    "api_crude_mb": 1.786,
 }
 MARKET = {"atr_20": 4.839, "ovx": 53.74, "cl1_cl2": 2.24, "crack_321": 61.6, "brent_wti": 6.8, "dxy": 101.3,
           "wti": 89.7, "as_of": "22-09-2026", "fetched_at": "23-09-2026 18:00"}
@@ -157,7 +157,7 @@ def test_ai_output_cannot_change_the_signal():
 
 CONSENSUS = {"release_date": "23-09-2026", "crude_consensus_mb": -0.6,
              "gasoline_consensus_mb": 0.1, "distillate_consensus_mb": -0.6}
-API = {"release_date": "22-09-2026", "api_crude_mb": 1.786, "api_cushing_mb": 2.08}
+API = {"release_date": "22-09-2026", "api_crude_mb": 1.786}
 EIA = {"release_date": "23-09-2026", "crude_change_mb": 2.969, "cushing_change_mb": 2.266,
        "cushing_level_mb": 23.748, "gasoline_change_mb": -1.686, "distillate_change_mb": -0.428,
        "refinery_util_change_pct": -2.8}

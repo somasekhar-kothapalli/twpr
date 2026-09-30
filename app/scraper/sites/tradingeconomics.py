@@ -118,26 +118,5 @@ def parse_stats_table(soup):
     return {"actual_mb": None, "previous_mb": None}
 
 
-def parse_related_table(soup):
-    """The 'Related | Last | Previous | Unit | Reference' snapshot every TE page
-    carries: {indicator name: {actual_mb, previous_mb}} (empty if absent).
-
-    It is UNDATED - 'Last' is whatever TE holds as the newest release - and rounded
-    to 2 decimals. It is the only place the API Cushing/gasoline/distillate values
-    exist, so callers must cross-check it against a dated row before trusting it.
-    """
-    out = {}
-    for table in soup.find_all("table", class_="table"):
-        headers = [th.get_text(strip=True) for th in table.select("th")]
-        if headers[:4] != ["Related", "Last", "Previous", "Unit"]:
-            continue
-        for tr in table.find_all("tr"):
-            cells = [td.get_text(strip=True) for td in tr.find_all("td")]
-            if len(cells) >= 4:
-                out[cells[0]] = {"actual_mb": _to_mb_unit_aware(cells[1], cells[3]),
-                                 "previous_mb": _to_mb_unit_aware(cells[2], cells[3])}
-    return out
-
-
 if __name__ == "__main__":
     run_cli(TradingEconomicsScraper, "united-states/crude-oil-stocks-change")

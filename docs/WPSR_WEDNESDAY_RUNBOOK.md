@@ -428,7 +428,7 @@ What the repo does versus what is still by eye. Nothing here is backtested, and 
 | Runbook item | Status | Where |
 |---|---|---|
 | Consensus (crude, gasoline, distillate) | Automated: tradingeconomics and investing.com race | `app/consensus_fetcher.py` |
-| Tuesday API report, API surprise flag (> 3.0 mb) | Automated (API report); flag is in the signal scorecard | `app/api_monitor.py` |
+| Tuesday API report, API surprise flag (> 3.0 mb) | Automated for **crude only** (the API's Cushing/gasoline/distillate are paywalled; the free copies lag); flag is in the signal scorecard | `app/api_monitor.py` |
 | The print (four stock changes, refinery util change) | Automated, polling from 10:30 ET | `app/eia_actuals.py` |
 | Cushing level | Automated from EIA's public table, cross-checked to the change | `app/utils/eia_levels.py` |
 | ATR_20, OVX, CL1−CL2, 3:2:1 crack, Brent−WTI, DXY | Automated, yfinance (must be run before the print) | `app/market_data.py` |

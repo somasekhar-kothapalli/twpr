@@ -2,10 +2,8 @@ import datetime
 import time
 
 import pytest
-from bs4 import BeautifulSoup
 
-from app.api_monitor import RELATED_NAMES, fetch_api_report, legs_from_snapshot
-from app.scraper.sites.tradingeconomics import parse_related_table
+from app.api_monitor import fetch_api_report
 
 TODAY_AFTER = datetime.date(2026, 9, 23)   # the 22-09 report is due and printed
 TODAY_BEFORE = datetime.date(2026, 9, 29)  # 29-09 report is due but not printed yet
@@ -20,21 +18,11 @@ def rows(actual=1.786, released=True):
     return out
 
 
-def related_soup(crude=1.79, cushing=2.08, gasoline=-2.16, distillate=-2.16):
-    values = {"crude": crude, "cushing": cushing, "gasoline": gasoline, "distillate": distillate}
-    body = "".join(
-        f"<tr><td>{RELATED_NAMES[k]}</td><td>{v}</td><td>0.5</td><td>BBL/1Million</td><td>Sep 2026</td></tr>"
-        for k, v in values.items() if v is not None)
-    return BeautifulSoup(
-        '<table class="table"><thead><tr><th>Related</th><th>Last</th><th>Previous</th><th>Unit</th>'
-        f"<th>Reference</th></tr></thead><tbody>{body}</tbody></table>", "html.parser")
-
-
 class FakeScraper:
     session_gap_s = 0
 
-    def __init__(self, result, delay):
-        self.result, self.delay = result, delay
+    def __init__(self, page, delay):
+        self.page, self.delay = page, delay
 
     def __enter__(self):
         return self
@@ -42,152 +30,70 @@ class FakeScraper:
     def __exit__(self, *exc):
         pass
 
-    def fetch_with_soup(self, slug):
+    def fetch_page(self, slug):
         time.sleep(self.delay)
-        return self.result
+        return self.page
 
 
 def make(**per_site):
-    """per_site = {site: ((page, soup), delay)}; page None simulates a failed fetch."""
+    """per_site = {site: (page, delay)}; page None simulates a failed fetch."""
     return lambda site: FakeScraper(*per_site[site])
 
 
-def te(rows_=None, soup=None, delay=0):
-    page = {"calendar_rows": rows_ if rows_ is not None else rows(), "stats": {}}
-    return ((page, soup or related_soup()), delay)
+def site(rows_=None, delay=0):
+    return ({"calendar_rows": rows_ if rows_ is not None else rows(), "stats": {}}, delay)
 
 
-def inv(rows_=None, delay=0):
-    return (({"calendar_rows": rows_ if rows_ is not None else rows(), "stats": {}}, None), delay)
-
-
-def run(**per_site):
-    kwargs = {"today": TODAY_AFTER, "make_scraper": make(**per_site), "timeout_s": 5}
-    kwargs.update(per_site.pop("_kw", {}))
-    return fetch_api_report(**kwargs)
-
-
-def test_all_four_legs_from_tradingeconomics():
-    result = fetch_api_report(today=TODAY_AFTER, timeout_s=5, make_scraper=make(tradingeconomics=te(), investing=inv(delay=0.5)))
-    assert result == {
-        "release_date": RELEASED,
-        "api_crude_mb": 1.786,           # dated row keeps 3 decimals, not the snapshot's 1.79
-        "api_cushing_mb": 2.08,
-        "api_gasoline_mb": -2.16,
-        "api_distillate_mb": -2.16,
-        "crude_source": "tradingeconomics",
-        "cushing_source": "tradingeconomics",
-        "gasoline_source": "tradingeconomics",
-        "distillate_source": "tradingeconomics",
-    }
-
-
-def test_a_faster_investing_wins_crude_only():
+def test_crude_from_tradingeconomics_keeps_three_decimals():
     result = fetch_api_report(today=TODAY_AFTER, timeout_s=5,
-                              make_scraper=make(tradingeconomics=te(delay=0.4), investing=inv()))
+                              make_scraper=make(tradingeconomics=site(), investing=site(delay=0.5)))
+    assert result == {"release_date": RELEASED, "api_crude_mb": 1.786, "crude_source": "tradingeconomics"}
+
+
+def test_the_report_is_crude_only():
+    """Cushing/gasoline/distillate are paywalled or stale on TE: they must not reappear."""
+    result = fetch_api_report(today=TODAY_AFTER, timeout_s=5, make_scraper=make(tradingeconomics=site(), investing=site()))
+    assert set(result) == {"release_date", "api_crude_mb", "crude_source"}
+
+
+def test_a_faster_investing_wins():
+    result = fetch_api_report(today=TODAY_AFTER, timeout_s=5,
+                              make_scraper=make(tradingeconomics=site(delay=0.4), investing=site()))
     assert result["crude_source"] == "investing.com"
-    assert {result["cushing_source"], result["gasoline_source"], result["distillate_source"]} == {"tradingeconomics"}
 
 
-def test_stale_related_snapshot_is_rejected():
-    """TE updated the dated crude row but the undated legs still show last week."""
-    stale = related_soup(crude=7.14, cushing=-0.25, gasoline=1.46, distillate=1.61)
-    with pytest.raises(RuntimeError, match="different release") as err:
-        fetch_api_report(today=TODAY_AFTER, timeout_s=5, make_scraper=make(tradingeconomics=te(soup=stale), investing=inv()))
-    for leg in ("cushing", "gasoline", "distillate"):
-        assert leg in str(err.value)
-    assert "crude (" not in str(err.value)  # crude itself was fine
+def test_one_site_down_the_other_still_delivers():
+    result = fetch_api_report(today=TODAY_AFTER, timeout_s=5,
+                              make_scraper=make(tradingeconomics=(None, 0), investing=site()))
+    assert result["crude_source"] == "investing.com" and result["api_crude_mb"] == 1.786
 
 
 def test_not_released_yet_is_an_error():
     r = rows(released=False)
-    r[-1]["actual"] = None
     with pytest.raises(RuntimeError, match="not released yet"):
-        fetch_api_report(today=TODAY_BEFORE, timeout_s=5, make_scraper=make(tradingeconomics=te(rows_=r), investing=inv(rows_=r)))
+        fetch_api_report(today=TODAY_BEFORE, timeout_s=5, make_scraper=make(tradingeconomics=site(r), investing=site(r)))
 
 
 def test_default_target_is_the_latest_due_release_not_next_weeks():
     r = rows(released=False)  # includes the upcoming 29-09 row
-    result = fetch_api_report(today=TODAY_AFTER, timeout_s=5, make_scraper=make(tradingeconomics=te(rows_=r), investing=inv(rows_=r)))
+    result = fetch_api_report(today=TODAY_AFTER, timeout_s=5, make_scraper=make(tradingeconomics=site(r), investing=site(r)))
     assert result["release_date"] == RELEASED
 
 
-def test_investing_alone_cannot_supply_the_legs():
-    with pytest.raises(RuntimeError, match=r"no valid API report value for cushing \(no site supplied it\), gasoline"):
-        fetch_api_report(today=TODAY_AFTER, sites=("investing",), timeout_s=5, make_scraper=make(investing=inv()))
-
-
-def test_a_leg_missing_from_the_snapshot_fails_only_that_leg():
-    with pytest.raises(RuntimeError, match="gasoline") as err:
-        fetch_api_report(today=TODAY_AFTER, timeout_s=5,
-                         make_scraper=make(tradingeconomics=te(soup=related_soup(gasoline=None)), investing=inv()))
-    assert "cushing (" not in str(err.value) and "distillate (" not in str(err.value)
-
-
-def test_explicit_older_date_cannot_use_the_latest_only_snapshot():
-    older = "15-09-2026"
-    with pytest.raises(RuntimeError, match="different release"):
-        fetch_api_report(older, today=TODAY_AFTER, timeout_s=5, make_scraper=make(tradingeconomics=te(), investing=inv()))
+def test_an_explicit_older_date_is_now_fine_because_crude_is_a_dated_row():
+    """Replaying an older release used to be rejected (the undated legs); crude alone can replay."""
+    result = fetch_api_report("15-09-2026", today=TODAY_AFTER, timeout_s=5,
+                              make_scraper=make(tradingeconomics=site(), investing=site()))
+    assert (result["release_date"], result["api_crude_mb"]) == ("15-09-2026", 7.14)
 
 
 def test_both_sites_down():
     with pytest.raises(RuntimeError, match="no valid API report value for crude"):
-        fetch_api_report(today=TODAY_AFTER, timeout_s=5, make_scraper=make(tradingeconomics=((None, None), 0), investing=((None, None), 0)))
-
-
-def test_related_table_parser_and_snapshot_check():
-    related = parse_related_table(related_soup())
-    assert related[RELATED_NAMES["cushing"]]["actual_mb"] == 2.08
-    ok = legs_from_snapshot(related, {"actual": 1.786})
-    assert ok == {"cushing": 2.08, "gasoline": -2.16, "distillate": -2.16}
-    assert all(isinstance(v, ValueError) for v in legs_from_snapshot(related, {"actual": 5.0}).values())
-    assert parse_related_table(BeautifulSoup("<p>nothing</p>", "html.parser")) == {}
+        fetch_api_report(today=TODAY_AFTER, timeout_s=5, make_scraper=make(tradingeconomics=(None, 0), investing=(None, 0)))
 
 
 def test_stale_default_target_is_refused():
     """Holiday-shifted week: the latest due report is days old and already printed."""
     with pytest.raises(RuntimeError, match="days old"):
         fetch_api_report(today=datetime.date(2026, 9, 26), timeout_s=5,
-                         make_scraper=make(tradingeconomics=te(), investing=inv()))
-
-
-# ------------------------------------------------ a leg TE has not updated yet (found live 2026-09-30)
-
-def related_with_previous(rows):
-    """rows: {leg: (last, previous)} -> a Related table soup carrying the Previous column."""
-    body = "".join(f"<tr><td>{RELATED_NAMES[leg]}</td><td>{last}</td><td>{prev}</td><td>BBL/1Million</td>"
-                   "<td>Sep 2026</td></tr>" for leg, (last, prev) in rows.items())
-    return BeautifulSoup('<table class="table"><thead><tr><th>Related</th><th>Last</th><th>Previous</th>'
-                         f"<th>Unit</th><th>Reference</th></tr></thead><tbody>{body}</tbody></table>", "html.parser")
-
-
-LAST_WEEK = {"release_date": "22-09-2026", "api_crude_mb": 1.786, "api_cushing_mb": 2.08,
-             "api_gasoline_mb": -2.16, "api_distillate_mb": -2.16}
-THIS_WEEK_CRUDE = {"actual": 1.019, "release_date": "29-09-2026"}
-
-
-def test_a_leg_still_showing_last_weeks_value_is_rejected_the_others_pass():
-    # live 2026-09-30: gasoline and distillate updated (previous == last week's), Cushing did not
-    related = parse_related_table(related_with_previous({
-        "crude": (1.02, 1.79), "cushing": (2.08, -0.25), "gasoline": (2.99, -2.16), "distillate": (-0.29, -2.16)}))
-    legs = legs_from_snapshot(related, THIS_WEEK_CRUDE, LAST_WEEK)
-    assert legs["gasoline"] == 2.99 and legs["distillate"] == -0.29
-    assert isinstance(legs["cushing"], ValueError) and "still shows last week's value" in str(legs["cushing"])
-
-
-def test_all_legs_pass_once_they_have_all_updated():
-    related = parse_related_table(related_with_previous({
-        "crude": (1.02, 1.79), "cushing": (3.5, 2.08), "gasoline": (2.99, -2.16), "distillate": (-0.29, -2.16)}))
-    assert legs_from_snapshot(related, THIS_WEEK_CRUDE, LAST_WEEK) == {
-        "cushing": 3.5, "gasoline": 2.99, "distillate": -0.29}
-
-
-@pytest.mark.parametrize("last_report", [
-    None,                                                     # no earlier file: nothing to compare with
-    {**LAST_WEEK, "release_date": "29-09-2026"},              # the file is THIS release (a re-run)
-    {**LAST_WEEK, "release_date": "01-09-2026"},              # a month old: not last week's, so no comparison
-])
-def test_no_previous_week_file_means_no_stale_check(last_report):
-    related = parse_related_table(related_with_previous({
-        "crude": (1.02, 1.79), "cushing": (2.08, -0.25), "gasoline": (2.99, -2.16), "distillate": (-0.29, -2.16)}))
-    assert legs_from_snapshot(related, THIS_WEEK_CRUDE, last_report)["cushing"] == 2.08
+                         make_scraper=make(tradingeconomics=site(), investing=site()))
