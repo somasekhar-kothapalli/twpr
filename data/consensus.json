@@ -1,0 +1,11 @@
+{
+  "release_date": "23-09-2026",
+  "crude_consensus_mb": -0.6,
+  "gasoline_consensus_mb": 0.1,
+  "distillate_consensus_mb": -0.6,
+  "crude_previous_mb": -0.64,
+  "crude_source": "tradingeconomics",
+  "gasoline_source": "tradingeconomics",
+  "distillate_source": "tradingeconomics",
+  "fetched_at": "30-09-2026 13:31"
+}

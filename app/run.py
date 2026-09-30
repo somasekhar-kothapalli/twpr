@@ -35,7 +35,7 @@ def plan(phase, replay=None):
         tuesday = (parse_release_date(replay) - timedelta(days=1)).strftime(DATE_FORMAT)
     pre = [
         ("consensus_fetcher", ["--date", replay] if replay else []),
-        ("api_monitor", ["--date", tuesday, "--once"] if replay else ["--once"]),
+        ("api_monitor", ["--date", tuesday, "--once"] if replay else ["--once"]), # type: ignore
         ("market_data", ["--date", replay] if replay else []),
         ("pre_brief", ["--allow-stale", "--print"] if replay else []),
     ]
