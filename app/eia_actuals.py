@@ -30,7 +30,9 @@ import argparse
 import logging
 import os
 
-from app.utils.common import EIA_ACTUALS_FILE, now_ist, now_utc, poll, setup_logging, write_json
+from dotenv import load_dotenv
+
+from app.utils.common import EIA_ACTUALS_FILE, ROOT, now_ist, now_utc, poll, setup_logging, write_json
 from app.utils.eia_levels import cushing_level
 from app.utils.racer import race
 from app.utils.telegram import send_exception
@@ -134,6 +136,7 @@ def fetch_eia_actuals(release_date=None, sites=SITES, make_scraper=scraper_for,
 
 def main(argv=None):
     setup_logging()
+    load_dotenv(ROOT / ".env")   # Telegram credentials for the failure alert
     parser = argparse.ArgumentParser(description="Capture the EIA weekly petroleum report actuals")
     parser.add_argument("--date", help="EIA release date, DD-MM-YYYY (default: today's report)")
     parser.add_argument("--once", action="store_true", help="a single attempt, no polling")

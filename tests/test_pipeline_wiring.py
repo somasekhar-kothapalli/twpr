@@ -74,6 +74,7 @@ def arm(monkeypatch, module, fetch_name, result, error=None):
     alerts, writes = [], []
     monkeypatch.setattr(module, "send_exception", lambda script, exc: alerts.append((script, exc)))
     monkeypatch.setattr(module, "write_json", lambda path, payload: writes.append((path, payload)))
+    monkeypatch.setattr(module, "load_dotenv", lambda *a, **k: None)   # never read the real .env in tests
     if hasattr(module, "cushing_level"):   # eia_actuals looks the level up on eia.gov
         monkeypatch.setattr(module, "cushing_level", lambda change: 23.748)
 
@@ -145,6 +146,20 @@ def test_a_failing_send_returns_false_and_never_leaks_the_token(monkeypatch, con
     with caplog.at_level(logging.DEBUG):
         assert telegram.send_message("hi") is False
     assert "SECRET-TOKEN-123" not in caplog.text
+
+
+@pytest.mark.parametrize("module", [consensus_fetcher, api_monitor, eia_actuals],
+                         ids=lambda m: m.__name__.split(".")[-1])
+def test_scripts_load_the_env_file_so_the_failure_alert_can_reach_telegram(monkeypatch, module):
+    """Found live: standalone runs never loaded .env, so 'alert not sent' hid every failure."""
+    loaded = []
+    monkeypatch.setattr(module, "load_dotenv", lambda path, *a, **k: loaded.append(path))
+    monkeypatch.setattr(module, "send_exception", lambda script, exc: None)
+    monkeypatch.setattr(module, "fetch_" + ("consensus" if module is consensus_fetcher else
+                                            "api_report" if module is api_monitor else "eia_actuals"),
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    module.main(["--once"] if module is not consensus_fetcher else [])
+    assert loaded == [common.ROOT / ".env"]
 
 
 def test_setup_logging_silences_httpx_so_the_token_url_is_not_logged():

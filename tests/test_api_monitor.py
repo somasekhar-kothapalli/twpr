@@ -149,3 +149,45 @@ def test_stale_default_target_is_refused():
     with pytest.raises(RuntimeError, match="days old"):
         fetch_api_report(today=datetime.date(2026, 9, 26), timeout_s=5,
                          make_scraper=make(tradingeconomics=te(), investing=inv()))
+
+
+# ------------------------------------------------ a leg TE has not updated yet (found live 2026-09-30)
+
+def related_with_previous(rows):
+    """rows: {leg: (last, previous)} -> a Related table soup carrying the Previous column."""
+    body = "".join(f"<tr><td>{RELATED_NAMES[leg]}</td><td>{last}</td><td>{prev}</td><td>BBL/1Million</td>"
+                   "<td>Sep 2026</td></tr>" for leg, (last, prev) in rows.items())
+    return BeautifulSoup('<table class="table"><thead><tr><th>Related</th><th>Last</th><th>Previous</th>'
+                         f"<th>Unit</th><th>Reference</th></tr></thead><tbody>{body}</tbody></table>", "html.parser")
+
+
+LAST_WEEK = {"release_date": "22-09-2026", "api_crude_mb": 1.786, "api_cushing_mb": 2.08,
+             "api_gasoline_mb": -2.16, "api_distillate_mb": -2.16}
+THIS_WEEK_CRUDE = {"actual": 1.019, "release_date": "29-09-2026"}
+
+
+def test_a_leg_still_showing_last_weeks_value_is_rejected_the_others_pass():
+    # live 2026-09-30: gasoline and distillate updated (previous == last week's), Cushing did not
+    related = parse_related_table(related_with_previous({
+        "crude": (1.02, 1.79), "cushing": (2.08, -0.25), "gasoline": (2.99, -2.16), "distillate": (-0.29, -2.16)}))
+    legs = legs_from_snapshot(related, THIS_WEEK_CRUDE, LAST_WEEK)
+    assert legs["gasoline"] == 2.99 and legs["distillate"] == -0.29
+    assert isinstance(legs["cushing"], ValueError) and "still shows last week's value" in str(legs["cushing"])
+
+
+def test_all_legs_pass_once_they_have_all_updated():
+    related = parse_related_table(related_with_previous({
+        "crude": (1.02, 1.79), "cushing": (3.5, 2.08), "gasoline": (2.99, -2.16), "distillate": (-0.29, -2.16)}))
+    assert legs_from_snapshot(related, THIS_WEEK_CRUDE, LAST_WEEK) == {
+        "cushing": 3.5, "gasoline": 2.99, "distillate": -0.29}
+
+
+@pytest.mark.parametrize("last_report", [
+    None,                                                     # no earlier file: nothing to compare with
+    {**LAST_WEEK, "release_date": "29-09-2026"},              # the file is THIS release (a re-run)
+    {**LAST_WEEK, "release_date": "01-09-2026"},              # a month old: not last week's, so no comparison
+])
+def test_no_previous_week_file_means_no_stale_check(last_report):
+    related = parse_related_table(related_with_previous({
+        "crude": (1.02, 1.79), "cushing": (2.08, -0.25), "gasoline": (2.99, -2.16), "distillate": (-0.29, -2.16)}))
+    assert legs_from_snapshot(related, THIS_WEEK_CRUDE, last_report)["cushing"] == 2.08

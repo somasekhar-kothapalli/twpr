@@ -153,6 +153,12 @@ all four fields are valid.
   not `pending_row`: after the report prints, the next-unreleased row jumps to next
   week, which would be wrong here. If that row hasn't printed it fails "not released
   yet" (and the poll retries).
+- **TE updates the four Related rows at different moments** (live 2026-09-30: crude, gasoline and
+  distillate were new but Cushing still showed last week's +2.08), so matching crude proves nothing
+  about the others. `legs_from_snapshot(..., last_report)` therefore also requires each leg's
+  "previous" to equal the previous week's `api_report.json` value for that leg (applied only when
+  that file is the release 4-10 days earlier); a leg that fails is rejected and the poll retries.
+  Without a last-week file there is no such check, so a first-ever run cannot catch it.
 - TE's gasoline and distillate both read **-2.16** for the 22-09 release. Checked against
   TE's own news text: gasoline fell 2.16 mb, distillate 2.164 mb (the snapshot rounds to
   2 dp), so the equal values are a coincidence, not a duplicated column.
@@ -212,6 +218,8 @@ Released Wed 10:30 ET (20:00 IST); polls every 60 s for up to 90 min unless `--o
   polling script exhausting its window (eia_actuals: 90 min) — the case that used to fail
   unnoticed. `send_*` never raises and logs the text if Telegram is unset. Only failures
   alert; success alerts are not built.
+- **Every script's `main` calls `load_dotenv`.** Found live: the fetchers never loaded `.env`, so
+  a failure printed "alert not sent" and Telegram never heard about it. A wiring test now asserts it.
 - `common.env/fmt/fmt_ts/is_stale` (placeholder-safe env reads: blank or `#`-leading = unset;
   DD-MM-YYYY dates), `setup_logging` silences httpx (the Telegram token is in its URL).
 - `common.poll(attempt, once, interval_s, timeout_s, log)` retries on `RuntimeError`

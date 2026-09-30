@@ -69,11 +69,11 @@ ALWAYS_CHECK = [
     "The lot table assumes the option loses delta x the futures stop. It ignores the IV crush after the "
     "print (vega): size below the table until you have measured real fills.",
 ]
+TIME_SPREAD_CHECK = ("Bullish only: a flat-price rally of $0.40 or more needs CL1-CL2 to widen $0.02-$0.04, "
+                     "otherwise reject the long.")
 REGIME_CHECK = {
     1: ["Regime 1: enter on a limit retest of the broken pre-release boundary (P_high long / P_low short), "
-        "aligned CVD. No retest = no trade.",
-        "Bullish only: a flat-price rally of $0.40 or more needs CL1-CL2 to widen $0.02-$0.04, "
-        "otherwise reject the long."],
+        "aligned CVD. No retest = no trade."],
     2: ["Regime 2 (FADE, lower conviction): do NOT trade the initial spike. Wait for a stall at prior daily "
         "high/low or Value Area, then a 1-min close back inside the pre-release range. "
         "Targets: opposite side of the range, then session POC. Size down without a clean confirmation candle."],
@@ -366,7 +366,7 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, equity_inr=None
                     "per_mb_usd": round(abs(usd) / abs(tls), 3), "sanity_ok": model.sanity_ok(tls, usd),
                     "anchor_low_usd": anchor[0], "anchor_high_usd": anchor[1],
                     "anchor_low_inr": int(round(anchor[0] * usd_inr)), "anchor_high_inr": int(round(anchor[1] * usd_inr))}
-        checklist = REGIME_CHECK[regime] + ALWAYS_CHECK
+        checklist = REGIME_CHECK[regime] + ([TIME_SPREAD_CHECK] if regime == 1 and direction == "bullish" else [])             + ALWAYS_CHECK
         if setup3 and regime != 3:
             checklist.insert(0, "Regime 3 inventory setup is present but the overnight rally is "
                              + ("unknown" if rally is None else f"only {rally:+.2f} USD (needs more than +1.00)")

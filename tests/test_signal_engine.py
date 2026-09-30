@@ -82,6 +82,10 @@ def test_bullish_regime_1_call_with_a_positive_expected_move():
     assert any("CL1-CL2 to widen" in line for line in s["checklist"])
 
 
+def test_the_time_spread_reminder_is_only_for_longs():
+    assert not any("CL1-CL2 to widen" in line for line in signal()["checklist"])      # the bearish reference week
+
+
 REGIME_3 = dict(crude_change_mb=-1.0, gasoline_change_mb=-3.0, distillate_change_mb=-2.0,
                 cushing_change_mb=-1.0, api_crude_mb=-5.0)
 

@@ -18,7 +18,9 @@ import argparse
 import logging
 import os
 
-from app.utils.common import CONSENSUS_FILE, now_ist, setup_logging, write_json
+from dotenv import load_dotenv
+
+from app.utils.common import CONSENSUS_FILE, ROOT, now_ist, setup_logging, write_json
 from app.utils.racer import race
 from app.utils.telegram import send_exception
 from app.scraper.sources import SOURCE_NAMES, scraper_for, slug_for
@@ -93,6 +95,7 @@ def fetch_consensus(release_date=None, sites=SITES, make_scraper=scraper_for, ti
 
 def main(argv=None):
     setup_logging()
+    load_dotenv(ROOT / ".env")   # Telegram credentials for the failure alert
     parser = argparse.ArgumentParser(description="Fetch the EIA consensus (first valid source per indicator wins)")
     parser.add_argument("--date", help="EIA release date, DD-MM-YYYY (default: the next unreleased report)")
     parser.add_argument("--sites", nargs="+", choices=SITES, default=list(SITES))

@@ -21,7 +21,9 @@ from datetime import datetime
 
 from app.model import history_tls, sigma_forecast
 from app.scraper.sources import scraper_for, slug_for
-from app.utils.common import DATE_FORMAT, SURPRISE_HISTORY_FILE, setup_logging, write_json
+from dotenv import load_dotenv
+
+from app.utils.common import DATE_FORMAT, ROOT, SURPRISE_HISTORY_FILE, setup_logging, write_json
 from app.utils.telegram import send_exception
 
 logger = logging.getLogger("twpr.surprise_history")
@@ -87,6 +89,7 @@ def backfill(make_scraper=scraper_for, sleep=time.sleep):
 
 def main(argv=None):
     setup_logging()
+    load_dotenv(ROOT / ".env")   # Telegram credentials for the failure alert
     parser = argparse.ArgumentParser(description="Weekly consensus-surprise history")
     parser.add_argument("--backfill", action="store_true", help="add past weeks from investing.com")
     args = parser.parse_args(argv)
