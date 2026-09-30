@@ -22,10 +22,13 @@ history as "current" anymore; it's only recoverable via `git show
 
 **What exists now** (rebuilt after that cleanup): `app/scraper/` (the TE and
 investing.com scrapers), the pipeline scripts `app/consensus_fetcher.py`,
-`app/api_monitor.py`, `app/eia_actuals.py`, `app/signal_engine.py` and `app/telegram_bot.py`, the helpers in
-`app/utils/` (`racer.py`, `common.py`, `telegram.py`), and `tests/`. Still **not
-present** from the old pipeline: the pre-brief message, expiry/currency
-strike logic, monitor/journal/scheduler, PetroCore, CI workflows.
+`app/api_monitor.py`, `app/eia_actuals.py`, `app/market_data.py`, `app/signal_engine.py` and `app/telegram_bot.py`,
+the release-day tools `app/run.py` (phase runner), `app/pre_brief.py`, `app/watch.py` (time reminders) and
+`app/journal.py` (your fills and the post-print price path), the pure modules `app/model.py`, `app/options.py`
+and `app/currency.py`, the helpers in `app/utils/` (`racer.py`, `common.py`, `telegram.py`, `eia_levels.py`), and
+`tests/`. **Execution is deliberately not automated:** the system alerts and reminds, you place and manage every
+order by hand. Still **not present**: an option-chain feed and any premium/price-based stop watching (both need a
+broker connection), PetroCore, CI workflows, and unattended scheduling (the commands are ready to schedule).
 
 **Naming rule:** TE's "Consensus" and investing.com's "Forecast" are the same
 figure and are called **`consensus`** everywhere in this app (`consensus`,
@@ -67,6 +70,13 @@ python -m app.signal_engine --allow-stale          # replay input files older th
 
 python -m app.telegram_bot                         # send data/signal.json to Telegram
 python -m app.telegram_bot --allow-stale           # replay an old signal (stamped REPLAY)
+
+python -m app.run pre                              # release-day afternoon: consensus, API, market, pre-brief
+python -m app.run print --watch                    # a few minutes before the print: actuals, signal, alert, reminders
+python -m app.run all --replay 23-09-2026          # a past release end to end (replay-stamped)
+python -m app.pre_brief --print                    # the pre-print brief, shown instead of sent
+python -m app.watch --dry-run                      # the reminder times for today's signal
+python -m app.journal fill ...                     # log a fill by hand;  path / show: post-print prices and statistics
 
 python -m pytest tests -q                          # offline suite (default)
 python -m pytest tests -m network -k tradingeconomics   # live URL health check
@@ -264,8 +274,11 @@ Sources: the 100 bbl options specification "March 2026 contract onwards" (Circul
 the newest and wins wherever it differs from the 2024 leaflet. Source of truth for the option mechanics; `docs/WPSR_MCX_OPTIONS_RUNBOOK.md` has the trading implications.
 
 - **Options exist on both `CRUDEOIL` (underlying: the 100 bbl futures) and `CRUDEOILM` (underlying: the 10 bbl
-  mini futures)** per the 2024 leaflet; the March 2026 document covers the 100 bbl contract only, so check the
-  current mini specification before relying on `CRUDEOILM`. European calls and puts, quoted in Rs per barrel;
+  mini futures)**, each with its own March 2026 options specification (Circular MCX/TRD/100/2026) and January 2026
+  futures specification (Circular MCX/TRD/319/2025). **The mini contract is identical in every rule except the
+  size and tick:** same 75/1/75 strikes, same Rs 50 interval, same "two business days before the futures" expiry,
+  same session and price limits, same devolution at expiry, and **the same 2026 futures expiry calendar**, so one
+  calendar serves both. European calls and puts, quoted in Rs per barrel;
   trading unit is one underlying futures contract (100 or 10 bbl). Tick Rs 0.10 (crude) / Rs 0.05 (mini); strike
   interval **Rs 50**. **Strikes: 75 ITM, 1 near-the-money and 75 OTM (151 calls and 151 puts) in the March 2026
   specification**, up from 25/1/25 (51) in the 2024 leaflet, so ITM strikes reach Rs 3,750 (about 43% of the
@@ -280,8 +293,11 @@ the newest and wins wherever it differs from the 2024 leaflet. Source of truth f
   Sep 21, Oct 19, Nov 19, Dec 18. They are in `options.FUTURES_EXPIRY_CALENDAR`; a month missing from it (2027 on)
   falls back to the 19th and is flagged `expiry_source: "assumed_19th"` in the signal, the message and the
   checklist. Oct 2026: futures Mon 19th, options Thu 15th (matches the user's date). "Business days" means MCX
-  trading days, so holidays matter (`options.HOLIDAYS` is empty). The old fixed-19th rule was wrong for a
-  third of 2026 (Sep would have been the 18th, Jul the 17th).
+  trading days, so holidays matter: `options.MCX_HOLIDAYS_2026` holds MCX's 2026 trading-holiday list (16 days).
+  Only days with **both** sessions closed (Republic Day, Good Friday, Gandhi Jayanti, Christmas) are treated as
+  non-business days for the expiry count; a day with one session open counts as a business day (an assumption).
+  None of the 2026 holidays moves an expiry (tested). The old fixed-19th rule was wrong for a third of 2026
+  (Sep would have been the 18th, Jul the 17th).
 - **The buyer's premium is blocked upfront in full**, in real time; there is no margin for a buyer (extreme loss
   margin applies to shorts only). A deep-ITM option is expensive: about Rs 1,300 per bbl at today's levels, i.e.
   roughly Rs 1.3 lakh per crude lot or Rs 13,000 per mini lot (Black-76, IV 54%, 22 days; an estimate).
@@ -289,8 +305,17 @@ the newest and wins wherever it differs from the 2024 leaflet. Source of truth f
   price, not spot.
 - **Futures daily price limit 4%, relaxed to 6% and then 9%** (15-minute cooling-off at the second step); option
   bands are set from Black-76 and can freeze even when the futures are not limited.
-- **Session: 9:00 to 23:30, or to 23:55 during US daylight-saving time.** In winter the session ends at 23:30 IST,
-  exactly when the runbook's "print + 2.5 h" hard exit falls (print 21:00 IST) - see the review notes.
+- **Holidays are mostly morning-only.** Of MCX's 16 trading holidays in 2026 only four close the whole day;
+  most (Holi, Ram Navmi, Dassera, Diwali, ...) close the 9:00-17:00 morning session but **the evening session, when
+  the EIA report prints, still trades**. New Year Day is the reverse: morning open, evening closed. The signal
+  warns loudly when the release day's evening session is closed (`schedule.mcx_evening_open`), because you
+  cannot trade it. Muhurat trading (Sun 8 Nov 2026) is not modelled. MCX's page also lists a 29 Sep 2026
+  circular "Revision in Trading Hours" that has not been read.
+- **Session: 9:00 to 23:30 IST while US daylight saving time is in force, 23:55 after it ends** (Circular
+  MCX/TRD/550/2026, 29 Sep 2026: 23:55 from Mon 2 Nov 2026 to Fri 12 Mar 2027; 23:30 the rest of the year;
+  `options.session_close`). An earlier note here had this backwards. The print is 20:00 IST in summer (close 23:30)
+  and 21:00 IST in winter (close 23:55), so the hard exit is "print + 2.5 h" capped at one hour before the close:
+  22:30 in summer, 22:55 in winter (2.5 h would be 23:30, only 25 minutes before the close).
 - **At expiry the open position devolves into the underlying futures** (March 2026 spec): a long call becomes a long
   futures position and a long put a short futures position, opened at the strike; ITM options are exercised
   automatically unless the long holder gives a contrary instruction. A devolved position needs futures margin
@@ -338,8 +363,8 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
 - **Option:** ITM only. Delta 0.60-0.70, or 0.80-0.85 when OVX is strictly above 35.
   Expiry = the nearest **option** expiry, which is `OPTION_LEAD_BUSINESS_DAYS` (2) business days
   before the futures expiry taken from MCX's 2026 calendar (see "MCX contract facts"): October 2026 options
-  expire Thu 15 Oct. Months outside the calendar (2027 on) are a flagged guess, and MCX holidays are not
-  modelled (`options.HOLIDAYS` is empty - fill it in).
+  expire Thu 15 Oct. Months outside the calendar (2027 on) are a flagged guess, and so are 2027 holidays
+  (only the 2026 list is loaded).
   Rolled to next month when 5 or fewer days remain. No option-chain
   feed exists: the strike is left to you (pick the ITM strike whose delta is in range).
 - **Sizing (changed 2026-09-30):** no equity math any more. You set `MCX_CRUDEOIL_LOT_SIZE` and/or
@@ -352,8 +377,8 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
   from a 1% risk budget: pick the lot count so the loss at your real stop is acceptable.
   `MCX_NATURALGAS_LOT_SIZE` and `MCX_NATURALGASM_LOT_SIZE` (mini) are loaded and validated but **reserved**:
   nothing reads them (crude only).
-  MCX does list options on the mini contract (`CRUDEOILM`, underlying the 10 bbl mini futures, per the
-  leaflet), so `MCX_CRUDEOILM_LOT_SIZE` is usable; the maths uses 10 bbl a lot.
+  MCX lists options on the mini contract (`CRUDEOILM`, underlying the 10 bbl mini futures; confirmed by its March
+  2026 specification), so `MCX_CRUDEOILM_LOT_SIZE` is usable; the maths uses 10 bbl a lot.
 - **Not automated (on `checklist`):** time-spread and dealer-gamma filters, the retest entry,
   the real stop, FX/RBI and geopolitical aborts, OI pinning haircut. The pre-release
   `scorecard` is informational: the runbook doesn't say how a miss changes the trade.
@@ -371,8 +396,24 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
 - **Live finding (2026-09-30):** the history's 12-08-2026 week has a +19.9 mb TLS. With the plain
   std dev sigma was ~8.3 mb; the default MAD gives ~5.8 on the 8 prior weeks, so a trade needs
   |TLS| above ~7 mb. The 23-09 reference week (TLS +2.23) **stands down** under any method.
-- **USD/INR** comes from `yfinance` (`INR=X`, 10 s timeout) or the fallback 84.0; a quote
-  outside 50-150 is treated as bad data.
+- **USD/INR** comes from `yfinance` (`INR=X`, 10 s timeout), then **FreeCurrencyAPI** as a backup
+  (`FREECURRENCYAPI_KEY` in `.env`; `signal.inputs.usd_inr_source` says which answered). A quote outside 50-150
+  is bad data. **There is no default rate any more:** with neither source the engine raises
+  `InputError("USD/INR unavailable")` (Telegram alert, exit 1, nothing written). The old 84.0 fallback was 12%
+  off the live ~96 and every rupee figure inherited the error. The API key travels in the request URL, so failures
+  are reported by exception type / HTTP status only, never `str(exc)` (a test enforces it).
+- **Rupee context (`app/currency.py`, adapted from the earlier pipeline's module):** `market.json` carries
+  `usd_inr_trend_pct` (USD/INR over the last 5 sessions); a trade signal gets a `currency` block (direction,
+  whether the rupee `amplifies`/`dampens` the trade, notes) and a "Rupee:" line. It never feeds the decision:
+  onshore USD/INR trades 09:00-17:00 IST only and the hold is ~20:00-22:30, so the currency market is shut
+  throughout (the earlier pipeline measured WTI's mean absolute move at 7.7x USD/INR's and the currency at a
+  median 12% of the combined MCX move). The old "abort if the RBI moves" checklist line was replaced by a
+  fair-value check: MCX futures should sit near WTI x USD/INR.
+- **Strike guide (no option chain available):** `options.strike_guidance` estimates where the target-delta
+  strikes sit, from Black-76 with OVX standing in for MCX implied volatility, the futures level as WTI x USD/INR
+  and the days to expiry, rounded to the Rs 50 interval (`options.STRIKE_INTERVAL`, which the earlier pipeline
+  also verified against Zerodha's public instrument master). It is an estimate to aim the search on your chain,
+  not a quote; the message says so. A stand-down carries neither block.
 - **Groq caveats:** the spec's default model `llama-3.3-70b-versatile` is 404 for this
   account; `qwen/qwen3.8-27b` works (set `GROQ_MODEL`); `openai/gpt-oss-*` are reasoning
   models that spend `max_tokens=150` on hidden reasoning and return empty content. Replies
@@ -397,6 +438,35 @@ week."; missing optional data reads `N/A`/`unknown`, not a crash. Runs after `si
   `REPLAY - data is N days old, NOT a live signal`. Missing/corrupt file -> error alert too.
 - Windows consoles are cp1252: never `print()` this text (emoji raise `UnicodeEncodeError`);
   the script only logs, and `setup_logging` forces UTF-8.
+
+### `app/run.py`, `app/pre_brief.py`, `app/watch.py`, `app/journal.py` — release day and the record
+
+- **`run.py`** runs a phase in the right order as separate `python -m app.<script>` processes (the scrapers open a
+  real browser and end with a hard exit): `pre` = consensus_fetcher, api_monitor `--once`, market_data,
+  pre_brief; `print` = eia_actuals (polls), signal_engine, telegram_bot; `all` = both; `--watch` appends the
+  reminders; `--replay DD-MM-YYYY` swaps in every script's replay flags (the API date is the Tuesday before, the
+  pre-brief is printed not sent, the alert is stamped REPLAY); `--dry-run` lists the commands. The first
+  failing stage stops the chain (a signal built on stale files is worse than none) and alerts Telegram with what was
+  skipped. Scheduling is just these commands at fixed times (Task Scheduler / cron); the headed browser needs a
+  logged-in desktop.
+- **`pre_brief.py`** sends one message before the print: schedule (print, time stop, hard exit, MCX close), consensus,
+  the API surprise and whether it is pre-positioned, the option delta / expiry, the scorecard, the overnight rally
+  and whether Regime 3 is armed, and above all **how large the surprise must be for the model to trade** (1.25 x
+  sigma as |TLS|, and the crude-only build/draw that gives it with products at consensus). Read-only.
+- **`watch.py`** sends Telegram reminders from the signal's schedule (entry window +2 min, the 35-minute time stop,
+  hard exit -15 min, hard exit) and sleeps between them; skips any more than 90 s past; a stand-down has nothing to
+  watch. **Alerts only:** no orders, no broker, no prices, so it cannot watch the premium stop (that needs a live
+  option quote). Leave it running until the hard exit.
+- **`journal.py`** is the score-keeping for manual trades: `fill` logs a trade with the price you meant to pay
+  (slippage) and an estimated net (0.05% CTT on the sold premium and Rs 20 a leg, carried over from the earlier
+  pipeline: **estimates**, check your contract note), attaching the signal's decision if `signal.json` is for that
+  week; `path` records WTI at 0/1/2/5/10/15/30/60 minutes after the print from Yahoo's 1-minute bars (kept only
+  ~7 days, so run it soon after); `show` prints wins, net, average slippage and the average move **in the
+  signal's direction** by minute. Together these answer the two questions nine weeks of history cannot: what a
+  fill costs against the plan, and how much of the move is left by the time you can enter. `data/journal.json`
+  is local state (git-ignored). First real data point (23-09-2026 print, a +3.6 mb crude build): WTI was
+  -0.28 after 2 minutes and -0.63 after 30 against a beta_vol expectation of about -2.0 and an anchor of -0.3 to
+  -0.7: one week is not evidence, but it favours the anchor.
 
 ### `app/scraper/browser.py`
 

@@ -97,9 +97,11 @@ def test_deeper_delta_risks_more_per_lot():
 
 def test_release_clock_follows_us_daylight_saving():
     summer = options.release_schedule(date(2026, 9, 23))
-    assert summer == {"release_ist": "20:00", "time_stop_ist": "20:35", "hard_exit_ist": "22:30", "chop_exit_min": 4}
+    assert summer == {"release_ist": "20:00", "time_stop_ist": "20:35", "hard_exit_ist": "22:30",
+                      "session_close_ist": "23:30", "chop_exit_min": 4}
     winter = options.release_schedule(date(2026, 12, 9))
-    assert (winter["release_ist"], winter["hard_exit_ist"]) == ("21:00", "23:30")
+    # print 21:00 IST; "print + 2.5 h" would be 23:30, but the session runs to 23:55: capped an hour before it
+    assert (winter["release_ist"], winter["hard_exit_ist"], winter["session_close_ist"]) == ("21:00", "22:55", "23:55")
     assert options.release_schedule(date(2026, 10, 28))["release_ist"] == "20:00"     # EDT until 1 Nov 2026...
     assert options.release_schedule(date(2026, 11, 4))["release_ist"] == "21:00"      # ...then EST
 
@@ -115,3 +117,95 @@ def test_a_move_near_the_band_is_flagged_and_direction_does_not_matter():
     assert up == down and up["near_band"] is True                 # 260 / 301 = 86% of the band
     assert options.band_context(227, 7535)["near_band"] is True    # 75.3% of 301.4
     assert options.band_context(226, 7535)["near_band"] is False   # 74.98%
+
+
+# ------------------------------------------------------------ MCX holidays (trading holidays page, 2026)
+
+def test_only_days_with_both_sessions_closed_are_holidays_for_the_expiry_count():
+    assert options.HOLIDAYS == frozenset({date(2026, 1, 26), date(2026, 4, 3), date(2026, 10, 2), date(2026, 12, 25)})
+    assert date(2026, 9, 14) not in options.HOLIDAYS      # Ganesh Chaturthi: the morning is closed, the evening trades
+
+
+@pytest.mark.parametrize("day,is_open,reason", [
+    (date(2026, 9, 23), True, None),                       # an ordinary Wednesday
+    (date(2026, 3, 3), True, None),                        # Holi: morning closed, evening OPEN
+    (date(2026, 10, 20), True, None),                      # Dassera: same
+    (date(2026, 1, 1), False, "New Year Day"),             # the reverse: morning open, evening CLOSED
+    (date(2026, 1, 26), False, "Republic Day"),
+    (date(2026, 10, 2), False, "Mahatma Gandhi Jayanti"),
+    (date(2026, 12, 25), False, "Christmas"),
+    (date(2026, 9, 26), False, "weekend"),
+])
+def test_the_evening_session_is_what_matters_for_an_eia_release(day, is_open, reason):
+    assert options.mcx_evening_session(day) == (is_open, reason)
+
+
+def test_every_listed_holiday_is_a_weekday_and_the_table_matches_the_page():
+    assert len(options.MCX_HOLIDAYS_2026) == 16
+    assert all(day.weekday() < 5 for day in options.MCX_HOLIDAYS_2026)
+    both_closed = [n for n, m, e in options.MCX_HOLIDAYS_2026.values() if not m and not e]
+    assert both_closed == ["Republic Day", "Good Friday", "Mahatma Gandhi Jayanti", "Christmas"]
+
+
+def test_no_2026_holiday_moves_any_option_expiry(monkeypatch):
+    """Checked against the calendar: the holidays fall outside every two-business-day lead, so the expiries
+    computed from weekends alone are the same as with the holiday list."""
+    with_holidays = [options.option_expiry(2026, m) for m in range(1, 13)]
+    monkeypatch.setattr(options, "HOLIDAYS", frozenset())
+    assert with_holidays == [options.option_expiry(2026, m) for m in range(1, 13)]
+
+
+@pytest.mark.parametrize("day,close", [
+    (date(2026, 9, 23), (23, 30)),    # US daylight saving time: 23:30
+    (date(2026, 10, 30), (23, 30)),   # the last Friday before the change
+    (date(2026, 11, 2), (23, 55)),    # circular MCX/TRD/550/2026: 23:55 from Monday 2 Nov 2026...
+    (date(2026, 12, 9), (23, 55)),
+    (date(2027, 3, 12), (23, 55)),    # ...through Friday 12 Mar 2027
+    (date(2027, 3, 15), (23, 30)),    # US clocks changed on Sunday 14 Mar: back to 23:30
+])
+def test_session_close_follows_the_circular(day, close):
+    assert options.session_close(day) == close
+
+
+def test_the_hard_exit_is_never_within_an_hour_of_the_close():
+    for day in (date(2026, 9, 23), date(2026, 12, 9), date(2027, 1, 13), date(2027, 3, 10), date(2027, 3, 17)):
+        s = options.release_schedule(day)
+        hard = int(s["hard_exit_ist"][:2]) * 60 + int(s["hard_exit_ist"][3:])
+        close = int(s["session_close_ist"][:2]) * 60 + int(s["session_close_ist"][3:])
+        assert close - hard >= options.HARD_EXIT_BEFORE_CLOSE_MIN
+
+
+# -------------------------------------------------------------- strike guidance (no option chain available)
+
+F, IV, DAYS = 8640.0, 0.54, 22
+
+
+def test_black76_delta_is_the_textbook_number_at_the_money():
+    assert options.black76_delta(F, F, IV, DAYS, "CALL") == pytest.approx(0.5 + 0.0, abs=0.06)
+    assert options.black76_delta(F, F, IV, DAYS, "PUT") == pytest.approx(options.black76_delta(F, F, IV, DAYS, "CALL") - 1)
+    assert options.black76_delta(F, F * 0.8, IV, DAYS, "CALL") > 0.9 and options.black76_delta(F, F * 1.2, IV, DAYS, "PUT") < -0.9
+
+
+@pytest.mark.parametrize("option_type", ["CALL", "PUT"])
+@pytest.mark.parametrize("delta", [0.60, 0.70, 0.80, 0.85])
+def test_the_strike_for_a_delta_really_has_that_delta(option_type, delta):
+    strike = options.strike_for_delta(F, IV, DAYS, delta, option_type)
+    assert abs(options.black76_delta(F, strike, IV, DAYS, option_type)) == pytest.approx(delta, abs=1e-9)
+    assert (strike < F) if option_type == "CALL" else (strike > F)          # ITM: calls below the futures, puts above
+
+
+def test_strike_guidance_matches_the_hand_calculation_and_rounds_to_50():
+    guide = options.strike_guidance(F, 54.0, 22, (0.80, 0.85), "CALL")
+    assert guide["strike_at_delta_low"] == 7800 and guide["strike_at_delta_high"] == 7600     # 7,794 and 7,595 unrounded
+    assert guide["atm_strike"] == 8650 and guide["futures_level_inr"] == 8640
+    assert guide["delta_at_delta_low_strike"] == pytest.approx(0.80, abs=0.01)
+    put = options.strike_guidance(F, 54.0, 22, (0.80, 0.85), "PUT")
+    assert put["strike_at_delta_low"] > F and put["strike_at_delta_high"] > put["strike_at_delta_low"]
+    assert all(v % 50 == 0 for k, v in put.items() if k.startswith("strike_at") or k == "atm_strike")
+
+
+def test_a_longer_expiry_or_higher_volatility_pushes_the_target_strike_deeper():
+    near = options.strike_guidance(F, 54.0, 15, (0.80, 0.85), "CALL")["strike_at_delta_high"]
+    far = options.strike_guidance(F, 54.0, 38, (0.80, 0.85), "CALL")["strike_at_delta_high"]
+    calm = options.strike_guidance(F, 30.0, 22, (0.80, 0.85), "CALL")["strike_at_delta_high"]
+    assert far < near and calm > near                                 # deeper ITM = LOWER call strike

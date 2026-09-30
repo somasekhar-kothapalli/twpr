@@ -159,6 +159,12 @@ def test_a_bad_date_is_an_argument_error_not_a_silent_live_run(monkeypatch):
         md.main(["--date", "yesterday"])
 
 
+def test_usd_inr_trend_uses_the_last_five_sessions():
+    from app import currency
+    closes = [95.0, 95.1, 95.2, 95.3, 95.4, 95.5, 96.0]                   # 7 closes: the trend spans the last 6
+    assert currency.trend_pct(closes[-6:]) == pytest.approx((96.0 - 95.1) / 95.1 * 100, abs=1e-3)
+
+
 def test_a_missing_contract_probe_is_quiet(caplog):
     import logging
     with caplog.at_level(logging.INFO):

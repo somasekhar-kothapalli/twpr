@@ -6,7 +6,7 @@ from app import telegram_bot as tb
 from app.signal_engine import build_signal
 from app.utils.common import fmt, now_ist
 
-MARKET = {"atr_20": 4.839, "ovx": 53.74, "wti": 89.7, "cl1_cl2": 2.24, "crack_321": 61.6, "brent_wti": 6.8}
+MARKET = {"atr_20": 4.839, "ovx": 53.74, "wti": 89.7, "usd_inr_trend_pct": 0.62, "cl1_cl2": 2.24, "crack_321": 61.6, "brent_wti": 6.8}
 REFERENCE = {
     "release_date": "23-09-2026",
     "crude_consensus_mb": -0.6, "gasoline_consensus_mb": 0.1, "distillate_consensus_mb": -0.6,
@@ -32,6 +32,10 @@ def test_regime_1_message_has_everything_needed_to_act():
         "Cushing: +2.266 mb (confirms), level 23.7 mb, x1.39",
         "API crude: +1.786 mb (aligns)",
         "Option: delta 0.80-0.85 (OVX 53.7 above 35, deep ITM) | expiry 15-10-2026 (22d)",
+        "Strike guide (PUT, Black-76 estimate, OVX as IV - confirm on your chain): delta 0.80 ~ ",
+        "| futures ~INR 7,535 | ATM 7,550",
+        "Rupee: USD/INR +0.62% over 5 sessions (inr weakening), dampens this trade - INR sharply weakened 0.62% over 5 sessions, "
+        "working against a bearish MCX move.",
         "Expected WTI move (beta_vol): -2.01 USD = -168 INR on MCX (USD/INR 84.00, yfinance), 0.90 USD per mb",
         "Anchor (0.15-0.30 USD per mb): -0.33 to -0.67 USD = -28 to -56 INR - beta_vol is outside it",
         "MCX limit: futures band 4% = INR 301 (on ~INR 7,535/bbl); the beta_vol move is 2.2% of price = 56% of the band; "
@@ -40,7 +44,7 @@ def test_regime_1_message_has_everything_needed_to_act():
         "$0.18: 2,495 | $0.25: 3,465 | $0.35: 4,851",
         "CRUDEOILM: 3 lots x 10 bbl | INR lost if the option stop is hit, by futures stop:",
         "$0.18: 374 | $0.25: 520 | $0.35: 728",
-        "IST: print 20:00 | time stop 20:35 | hard exit 22:30 | chop exit 4 min",
+        "IST: print 20:00 | time stop 20:35 | hard exit 22:30 | close 23:30 | chop exit 4 min",
         "Checklist:",
         "- Limit orders only on the option chain",
         "Crude built more than expected; Cushing confirms.",
@@ -62,6 +66,12 @@ def test_regime_2_says_targets_are_chart_levels():
     text = tb.format_signal(signal(cushing_change_mb=-1.5, cushing_level_mb=40.0))
     assert text.splitlines()[0] == "🟢 TWPR SIGNAL - Regime 2 Bullish: CALL ITM"
     assert "Cushing: -1.500 mb (contradicts)" in text and "Targets: chart levels" in text and "Expected WTI move" not in text
+
+
+def test_a_closed_evening_session_is_a_loud_line_in_the_message():
+    text = tb.format_signal(signal(release_date="26-01-2026", crude_change_mb=12.0))
+    assert "!! MCX EVENING SESSION CLOSED on 26-01-2026 (Republic Day): you cannot trade this today" in text
+    assert "EVENING SESSION CLOSED" not in tb.format_signal(signal())
 
 
 def test_an_assumed_expiry_is_marked_in_the_message():

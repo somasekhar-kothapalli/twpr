@@ -82,6 +82,19 @@ def format_signal(signal, replay_days=None):
             + (", rolled" if option["rolled"] else "")
             + ("" if option["expiry_source"] == "mcx_calendar" else ", ASSUMED - check the chain") + ")",
         ]
+        guide = option.get("strike_guide")
+        if guide:
+            lines.append(f"Strike guide ({signal['signal']['option_type']}, Black-76 estimate, OVX as IV - confirm on your "
+                         f"chain): delta {option['delta_low']:.2f} ~ {guide['strike_at_delta_low']:,}, "
+                         f"delta {option['delta_high']:.2f} ~ {guide['strike_at_delta_high']:,} | futures ~INR "
+                         f"{guide['futures_level_inr']:,} | ATM {guide['atm_strike']:,}")
+        rupee = signal.get("currency")
+        if rupee:
+            trend = rupee["usd_inr_trend_pct"]
+            lines.append("Rupee: " + ("USD/INR history unavailable" if trend is None else
+                         f"USD/INR {trend:+.2f}% over 5 sessions ({rupee['direction'].replace('_', ' ')}), "
+                         f"{rupee['effect']} this trade") + ("" if not rupee["notes"] or trend is None else
+                                                             " - " + " ".join(rupee["notes"])))
         if move:
             lines.append(f"Expected WTI move (beta_vol): {move['wti_usd']:+.2f} USD = {move['mcx_inr']:+,} INR on MCX "
                          f"(USD/INR {move['usd_inr']:.2f}, {move['usd_inr_source']}), {move['per_mb_usd']:.2f} USD per mb")
@@ -98,9 +111,13 @@ def format_signal(signal, replay_days=None):
         else:
             lines.append("Targets: chart levels (no modelled move for this regime)")
         lines += _format_sizing(signal["sizing"])
+        if not schedule.get("mcx_evening_open", True):
+            lines += ["", f"!! MCX EVENING SESSION CLOSED on {signal['release_date']} ({schedule['mcx_closed_reason']}): "
+                          "you cannot trade this today"]
         lines += ["",
                   f"IST: print {schedule['release_ist']} | time stop {schedule['time_stop_ist']} | "
-                  f"hard exit {schedule['hard_exit_ist']} | chop exit {schedule['chop_exit_min']} min",
+                  f"hard exit {schedule['hard_exit_ist']} | close {schedule['session_close_ist']} | "
+                  f"chop exit {schedule['chop_exit_min']} min",
                   "", "Checklist:"] + [f"- {item}" for item in signal["checklist"]]
 
     if signal.get("analysis"):

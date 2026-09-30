@@ -440,8 +440,13 @@ What the repo does versus what is still by eye. Nothing here is backtested, and 
 | Entries, real stop (1.5×ATR_1min / VWAP ±1.5σ), scaling out, chop exit | **Manual** on the chart | signal checklist |
 | 5-year seasonal context, misread checks (§1) | **Manual** | — |
 | Alert to Telegram; failure alerts from every script | Automated | `app/telegram_bot.py`, `app/utils/telegram.py` |
+| Pre-release brief (schedule, consensus, API surprise, scorecard, how big a surprise must be to trade) | Automated (`python -m app.run pre`) | `app/pre_brief.py`, `app/run.py` |
+| Running the phases in order, stopping on the first failure | Automated, schedulable; not yet scheduled | `app/run.py` |
+| Time stop, hard-exit and entry-window reminders | Automated alerts (Telegram); you still act | `app/watch.py` |
+| Fill / slippage log and post-print price path (§6.1) | Automated bookkeeping; you enter the fills | `app/journal.py` |
+| Rupee context and a target-delta strike estimate (no option chain) | Automated estimates | `app/currency.py`, `app/options.py` |
 
-Not built yet: scheduling, the Tuesday pre-brief message, an option-chain feed, a trade journal / slippage log for §6.1, and a hard-exit reminder.
+Execution is deliberately manual in this version. Not built: an option-chain feed (real strikes, premiums, spreads) and any premium/price-based stop watching, both of which need a broker connection; unattended scheduling.
 
 ---
 

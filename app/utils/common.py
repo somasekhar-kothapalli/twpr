@@ -20,6 +20,7 @@ EIA_ACTUALS_FILE = DATA_DIR / "eia_actuals.json"  # eia_actuals       -> signal_
 MARKET_FILE = DATA_DIR / "market.json"            # market_data       -> signal_engine
 SURPRISE_HISTORY_FILE = DATA_DIR / "surprise_history.json"  # surprise_history -> signal_engine (sigma_forecast)
 SIGNAL_FILE = DATA_DIR / "signal.json"            # signal_engine
+JOURNAL_FILE = DATA_DIR / "journal.json"          # journal (your own fills and the post-print price paths)
 DATE_FORMAT = "%d-%m-%Y"
 TIMESTAMP_FORMAT = "%d-%m-%Y %H:%M"
 

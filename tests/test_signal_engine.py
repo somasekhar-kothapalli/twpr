@@ -1,7 +1,10 @@
 import datetime
 import json
+import logging
 import sys
 import types
+
+import httpx
 
 import pytest
 
@@ -341,15 +344,83 @@ def fake_yfinance(monkeypatch, price=None, error=None):
     fake_module(monkeypatch, "yfinance", Ticker=Ticker)
 
 
-def test_usd_inr_from_yfinance(monkeypatch):
+KEY = "fca_live_SECRETKEY123"
+
+
+def freecurrency(rate=None, status=200, error=None, calls=None):
+    """A stand-in for httpx.get that answers like FreeCurrencyAPI."""
+    def get(url, params=None, timeout=None):
+        if calls is not None:
+            calls.append((url, params))
+        if error:
+            raise error
+        request = httpx.Request("GET", url, params=params)
+        body = {"data": {"INR": rate}} if status == 200 else {"message": "nope"}
+        return httpx.Response(status, json=body, request=request)
+    return get
+
+
+def test_usd_inr_from_yfinance_needs_no_key(monkeypatch):
+    monkeypatch.delenv("FREECURRENCYAPI_KEY", raising=False)
     fake_yfinance(monkeypatch, price=83.47)
     assert fetch_usd_inr() == (83.47, "yfinance")
 
 
+def test_usd_inr_falls_back_to_freecurrencyapi_when_yfinance_fails(monkeypatch):
+    monkeypatch.setenv("FREECURRENCYAPI_KEY", KEY)
+    fake_yfinance(monkeypatch, error=RuntimeError("down"))
+    calls = []
+    assert fetch_usd_inr(get=freecurrency(95.91, calls=calls)) == (95.91, "freecurrencyapi")
+    assert calls[0][1] == {"apikey": KEY, "base_currency": "USD", "currencies": "INR"}
+
+
+def test_the_backup_is_not_called_when_yfinance_works(monkeypatch):
+    monkeypatch.setenv("FREECURRENCYAPI_KEY", KEY)
+    fake_yfinance(monkeypatch, price=95.5)
+    calls = []
+    assert fetch_usd_inr(get=freecurrency(1.0, calls=calls)) == (95.5, "yfinance") and calls == []
+
+
 @pytest.mark.parametrize("kwargs", [{"error": RuntimeError("down")}, {"price": 5.0}, {"price": 0.0}, {"price": 9999.0}])
-def test_usd_inr_falls_back(monkeypatch, kwargs):
+def test_a_bad_yfinance_quote_moves_on_to_the_backup(monkeypatch, kwargs):
+    monkeypatch.setenv("FREECURRENCYAPI_KEY", KEY)
     fake_yfinance(monkeypatch, **kwargs)
-    assert fetch_usd_inr() == (84.0, "fallback")
+    assert fetch_usd_inr(get=freecurrency(95.9)) == (95.9, "freecurrencyapi")
+
+
+@pytest.mark.parametrize("backup", [
+    dict(rate=95.9, status=429),                                  # rate limited
+    dict(rate=95.9, status=500),
+    dict(error=httpx.ConnectError("no route")),
+    dict(rate=9999.0),                                            # implausible
+    dict(rate=0.0),
+])
+def test_no_source_means_an_error_not_a_default_rate(monkeypatch, backup):
+    monkeypatch.setenv("FREECURRENCYAPI_KEY", KEY)
+    fake_yfinance(monkeypatch, error=RuntimeError("down"))
+    with pytest.raises(InputError) as err:
+        fetch_usd_inr(get=freecurrency(**backup))
+    assert err.value.title == "USD/INR unavailable" and "yfinance" in err.value.detail
+
+
+def test_without_a_key_only_yfinance_is_tried_and_the_error_says_so(monkeypatch):
+    monkeypatch.delenv("FREECURRENCYAPI_KEY", raising=False)
+    fake_yfinance(monkeypatch, error=RuntimeError("down"))
+    with pytest.raises(InputError, match="FREECURRENCYAPI_KEY not set"):
+        fetch_usd_inr()
+    monkeypatch.setenv("FREECURRENCYAPI_KEY", "# get one at freecurrencyapi.com")   # placeholder = unset
+    with pytest.raises(InputError, match="FREECURRENCYAPI_KEY not set"):
+        fetch_usd_inr()
+
+
+def test_the_api_key_never_reaches_an_error_message_or_a_log(monkeypatch, caplog):
+    """The key travels in the request URL; httpx puts that URL in its exception text."""
+    monkeypatch.setenv("FREECURRENCYAPI_KEY", KEY)
+    fake_yfinance(monkeypatch, error=RuntimeError("down"))
+    for backup in (dict(rate=1.0, status=429), dict(error=httpx.ConnectError(f"cannot reach ?apikey={KEY}"))):
+        with caplog.at_level(logging.DEBUG), pytest.raises(InputError) as err:
+            fetch_usd_inr(get=freecurrency(**backup))
+        assert KEY not in err.value.detail and KEY not in str(err.value) and KEY not in caplog.text
 
 
 def fake_groq(monkeypatch, content=None, error=None, calls=None, finish_reason="stop"):
@@ -443,6 +514,7 @@ def patch_main(monkeypatch, tmp_path):
     monkeypatch.delenv("MCX_NATURALGAS_LOT_SIZE", raising=False)
     monkeypatch.delenv("MCX_NATURALGASM_LOT_SIZE", raising=False)
     monkeypatch.delenv("SIGMA_METHOD", raising=False)
+    monkeypatch.delenv("FREECURRENCYAPI_KEY", raising=False)
     fake_yfinance(monkeypatch, price=84.0)
     alerts, recorded = [], []
     monkeypatch.setattr(se, "send_error", lambda script, msg: alerts.append((script, msg)))
@@ -484,8 +556,47 @@ def test_main_unexpected_error_alerts_telegram(monkeypatch, tmp_path):
     assert alerts and "ZeroDivisionError" in alerts[0][1]
 
 
+def test_a_trade_signal_on_a_day_the_evening_session_is_closed_says_so_first():
+    s = build_signal({**INPUTS, "release_date": "26-01-2026", "crude_change_mb": 12.0},
+                     {**MARKET, "fetched_at": "26-01-2026 18:00"}, SIGMA, 84.0, "fallback", analyse=stub())
+    assert s["signal"]["action"] == "trade"
+    assert s["schedule"]["mcx_evening_open"] is False and s["schedule"]["mcx_closed_reason"] == "Republic Day"
+    assert "EVENING SESSION IS CLOSED" in s["checklist"][0]
+    assert signal()["schedule"]["mcx_evening_open"] is True             # an ordinary Wednesday
+
+
 def test_an_expiry_outside_the_mcx_calendar_is_flagged_first_on_the_checklist():
     s = build_signal({**INPUTS, "release_date": "23-12-2026", "crude_change_mb": 12.0},
                      {**MARKET, "fetched_at": "23-12-2026 18:00"}, SIGMA, 84.0, "fallback", analyse=stub())
     assert s["signal"]["action"] == "trade" and s["option"]["expiry_source"] == "assumed_19th"
     assert "GUESS" in s["checklist"][0] and s["option"]["expiry_date"] in s["checklist"][0]
+
+
+def test_main_stops_with_an_alert_when_no_usd_inr_source_answers(monkeypatch, tmp_path):
+    alerts, recorded = patch_main(monkeypatch, tmp_path)
+    fake_yfinance(monkeypatch, error=RuntimeError("down"))
+    write(tmp_path)
+    assert se.main(["--allow-stale"]) == 1
+    assert not (tmp_path / "signal.json").exists() and recorded == []
+    assert alerts and "USD/INR unavailable" in alerts[0][1]
+
+
+def test_a_trade_signal_carries_the_strike_guide_and_the_rupee_block():
+    s = signal(market={**MARKET, "usd_inr_trend_pct": 0.62})
+    guide = s["option"]["strike_guide"]
+    assert guide["futures_level_inr"] == round(89.7 * 84.0) and guide["atm_strike"] % 50 == 0
+    assert guide["strike_at_delta_low"] < guide["strike_at_delta_high"]      # a PUT: the deeper the delta, the HIGHER the strike
+    assert 0.78 <= guide["delta_at_delta_low_strike"] <= 0.82 and 0.83 <= guide["delta_at_delta_high_strike"] <= 0.87
+    rupee = s["currency"]
+    assert (rupee["usd_inr_trend_pct"], rupee["direction"], rupee["effect"]) == (0.62, "inr_weakening", "dampens")
+    assert any("working against a bearish MCX move" in note for note in rupee["notes"])
+
+
+def test_a_stand_down_has_no_strike_guide_or_rupee_block():
+    s = signal(sigma=5.0)
+    assert s["option"] is None and s["currency"] is None
+
+
+def test_without_a_wti_price_there_is_no_strike_guide_but_the_signal_still_ships():
+    s = signal(market={**MARKET, "wti": None})
+    assert s["signal"]["action"] == "trade" and "strike_guide" not in s["option"]

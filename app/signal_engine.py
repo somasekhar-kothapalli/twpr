@@ -26,9 +26,11 @@ import re
 import sys
 import threading
 
+import httpx
+
 from dotenv import load_dotenv
 
-from app import model, options
+from app import currency, model, options
 from app.surprise_history import load_history, record_week
 from app.utils.common import (API_REPORT_FILE, CONSENSUS_FILE, DATA_DIR, EIA_ACTUALS_FILE, MARKET_FILE,
                               ROOT, SIGNAL_FILE, SURPRISE_HISTORY_FILE, env, fmt_ts, is_stale, now_ist,
@@ -39,7 +41,7 @@ logger = logging.getLogger("twpr.signal_engine")
 
 STALE_DAYS = 2             # consensus / EIA / market data older than this is refused
 API_MAX_LEAD_DAYS = 3      # the API report is released 1-2 days BEFORE the EIA report
-FALLBACK_USD_INR = 84.0
+FREECURRENCY_URL = "https://api.freecurrencyapi.com/v1/latest"
 USD_INR_PLAUSIBLE = (50.0, 150.0)  # a quote outside this is bad data, not a rate
 USD_INR_TIMEOUT_S = 10
 GROQ_TIMEOUT_S = 15.0
@@ -58,7 +60,8 @@ SCORECARD_THRESHOLDS = {"backwardation_cl1_cl2": 0.30, "crack_321": 22.0, "brent
 
 ALWAYS_CHECK = [
     "Limit orders only on the option chain, never a market order. A missed fill is not a loss.",
-    "USD/INR in its own volatility event (RBI)? Then ABORT - MCX decouples from NYMEX.",
+    "Fair value: MCX futures should sit near WTI x USD/INR (the futures level in the strike guide). If they are "
+    "far apart, or the rupee is gapping, do not trade: the price you would pay is not the WTI move the model measured.",
     "Geopolitical tension elevated? Size down 50% (circuit-limit risk).",
     "Price within $0.15 of a heavy-OI strike (weekly pinning)? Cut the expected move by 40%.",
     "Stop: 1.5 x 1-min ATR or outside VWAP +/-1.5 sigma, whichever is wider (min $0.18-$0.35); "
@@ -231,27 +234,59 @@ def load_sigma(release_date, data_dir=None, method="mad"):
 
 # ------------------------------------------------------------------ external calls
 
-def fetch_usd_inr():
-    """(rate, source): the yfinance quote, or the fallback if it fails, hangs or is implausible."""
+def _usd_inr_from_yfinance():
     result = {}
 
     def work():
         try:
             import yfinance as yf
             result["rate"] = float(yf.Ticker("INR=X").fast_info["lastPrice"])
-        except Exception as exc:  # noqa: BLE001 - any failure means fall back
+        except Exception as exc:  # noqa: BLE001 - reported by the caller
             result["error"] = exc
 
     thread = threading.Thread(target=work, daemon=True)
     thread.start()
     thread.join(USD_INR_TIMEOUT_S)
-    rate = result.get("rate")
-    if rate is not None and USD_INR_PLAUSIBLE[0] < rate < USD_INR_PLAUSIBLE[1]:
-        logger.info("USD/INR %.2f (yfinance)", rate)
-        return rate, "yfinance"
-    logger.warning("USD/INR unavailable (%s) - using fallback %.1f",
-                   result.get("error") or (f"implausible {rate}" if rate is not None else "timed out"), FALLBACK_USD_INR)
-    return FALLBACK_USD_INR, "fallback"
+    if "rate" not in result:
+        raise RuntimeError(f"{type(result['error']).__name__}" if "error" in result else "timed out")
+    return result["rate"]
+
+
+def _usd_inr_from_freecurrencyapi(key, get):
+    response = get(FREECURRENCY_URL, params={"apikey": key, "base_currency": "USD", "currencies": "INR"},
+                   timeout=USD_INR_TIMEOUT_S)
+    response.raise_for_status()
+    return float(response.json()["data"]["INR"])
+
+
+def fetch_usd_inr(get=httpx.get):
+    """(rate, source): yfinance first, then FreeCurrencyAPI (needs FREECURRENCYAPI_KEY). A quote outside
+    50-150 is bad data, not a rate. If neither source delivers, raise InputError: there is deliberately NO
+    default rate (the old 84.0 was 12% off the live ~96 and every rupee figure inherits that error).
+
+    Failure text names the exception type and, for HTTP errors, the status code only: the FreeCurrencyAPI
+    key travels in the URL, so str(exc) must never reach a log or a Telegram alert."""
+    key = env("FREECURRENCYAPI_KEY")
+    sources = [("yfinance", _usd_inr_from_yfinance)]
+    if key:
+        sources.append(("freecurrencyapi", lambda: _usd_inr_from_freecurrencyapi(key, get)))
+    problems = [] if key else ["freecurrencyapi: FREECURRENCYAPI_KEY not set"]
+    for name, fetch in sources:
+        try:
+            rate = fetch()
+        except httpx.HTTPStatusError as exc:
+            problems.append(f"{name}: HTTP {exc.response.status_code}")
+            continue
+        except Exception as exc:  # noqa: BLE001 - any failure means try the next source
+            problems.append(f"{name}: {exc if isinstance(exc, RuntimeError) else type(exc).__name__}")
+            continue
+        if USD_INR_PLAUSIBLE[0] < rate < USD_INR_PLAUSIBLE[1]:
+            logger.info("USD/INR %.2f (%s)", rate, name)
+            return rate, name
+        problems.append(f"{name}: implausible {rate}")
+    for problem in problems:
+        logger.warning("USD/INR: %s", problem)
+    raise InputError("USD/INR unavailable", "; ".join(problems))
 
 
 def fmt_optional(value):
@@ -363,6 +398,10 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
         low, high, deepened = options.target_delta(market["ovx"])
         option = {"delta_low": low, "delta_high": high, "ovx_deepened": deepened, "ovx": market["ovx"],
                   **options.pick_expiry(release_day)}
+        if market.get("wti"):   # no option chain: an estimate of where the target-delta strikes sit
+            option["strike_guide"] = options.strike_guidance(
+                market["wti"] * usd_inr, market["ovx"], max(option["days_to_expiry"], 1), (low, high),
+                signal["option_type"])
         if lots:   # {contract: lots} for the contracts you configured
             sizing = options.sizing(lots, usd_inr, (low, high))
         if regime == 1:   # Regimes 2 and 3 target chart levels, not a modelled move
@@ -382,6 +421,11 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
                              + ("unknown" if rally is None else f"only {rally:+.2f} USD (needs more than +1.00)")
                              + ", so it was not fired.")
     schedule = options.release_schedule(release_day)
+    evening_open, closed_reason = options.mcx_evening_session(release_day)
+    schedule["mcx_evening_open"], schedule["mcx_closed_reason"] = evening_open, closed_reason
+    if regime and not evening_open:
+        checklist.insert(0, f"MCX's EVENING SESSION IS CLOSED on {inputs['release_date']} ({closed_reason}): "
+                            "this signal cannot be traded today.")
     fx = {"usd_inr": round(usd_inr, 2), "usd_inr_source": usd_inr_source}
 
     if regime:
@@ -397,6 +441,7 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
         "signal": signal,
         "expected_move": None if move is None else {**move, **fx},
         "option": option,
+        "currency": currency.context(market.get("usd_inr_trend_pct"), direction) if regime else None,
         "sizing": sizing,
         "scorecard": scorecard(market, api_surprise),
         "schedule": schedule,

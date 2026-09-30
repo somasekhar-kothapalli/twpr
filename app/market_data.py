@@ -5,6 +5,7 @@
     cl1_cl2       front minus second WTI contract, USD/bbl               (scorecard, time-spread filter)
     crack_321     3:2:1 crack spread, USD/bbl                            (scorecard)
     overnight_rally_usd  WTI move from the API print (Tue 16:30 ET) to the EIA print   (Regime 3)
+    usd_inr_trend_pct    USD/INR change over the last 5 sessions                        (rupee context)
     brent_wti     Brent minus WTI, USD/bbl                               (scorecard)
     dxy           US dollar index                                        (context)
 
@@ -24,6 +25,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
+from app import currency
 from app.utils.common import DATE_FORMAT, MARKET_FILE, ROOT, fmt, fmt_ts, now_ist, now_utc, setup_logging, write_json
 from app.utils.telegram import send_exception
 
@@ -196,6 +198,11 @@ def fetch_market(today=None, asof=None):
     market["brent_wti"] = optional("Brent-WTI", lambda: round(last_close("BZ=F", before)[0] - wti, 2))
     market["crack_321"] = optional("3:2:1 crack", lambda: round(crack_321(wti, last_close("RB=F", before)[0], last_close("HO=F", before)[0]), 2))
     market["dxy"] = optional("DXY", lambda: round(last_close("DX-Y.NYB", before)[0], 2))
+
+    def inr_trend():   # USD/INR over the last 5 sessions (6 daily closes)
+        bars, _ = history("INR=X", before=before, lookback_days=20)
+        return currency.trend_pct([b[2] for b in bars][-6:])
+    market["usd_inr_trend_pct"] = optional("USD/INR trend", inr_trend)
     move = optional("overnight rally", lambda: overnight_rally(intraday_bars("CL=F", asof), now))
     market["overnight_rally_usd"] = move["rally_usd"] if move else None
     market["overnight_api_price"] = move["api_price"] if move else None

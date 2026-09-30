@@ -10,7 +10,7 @@ from app import api_monitor, consensus_fetcher, eia_actuals, signal_engine
 from app.utils import common, telegram
 
 APP = pathlib.Path(__file__).resolve().parent.parent / "app"
-DATA_FILES = ("consensus.json", "api_report.json", "eia_actuals.json", "market.json", "surprise_history.json", "signal.json")
+DATA_FILES = ("consensus.json", "api_report.json", "eia_actuals.json", "market.json", "surprise_history.json", "signal.json", "journal.json")
 
 
 # ----------------------------------------------------------- one home for file names

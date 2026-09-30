@@ -120,6 +120,27 @@ validation window is 1) and the message shows what those lots lose in INR if the
 `MCX_NATURALGASM_LOT_SIZE` are reserved for a future natural gas setup. Needs `GROQ_API_KEY` (and a `GROQ_MODEL` your account can use)
 for the narrative, and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for alerts. All optional.
 
+## Release day
+
+Run the phases in order (each stops at the first failure and alerts you):
+
+```bash
+python -m app.run pre                  # afternoon: consensus, API report, market data, then the pre-brief
+python -m app.run print --watch        # a few minutes before the print: actuals, signal, alert, then reminders
+python -m app.run all --replay 23-09-2026   # a past release end to end (replay-stamped)
+```
+
+- **`app.pre_brief`** tells you before the print how large a surprise the model needs before it will trade.
+- **`app.watch`** reminds you of the 35-minute time stop and the hard exit. Execution is manual: nothing here places
+  or changes an order, and it cannot see your option premium.
+- **`app.journal`** keeps score: `fill` logs a trade (slippage, estimated net), `path` records WTI after the print
+  (within ~7 days), `show` summarises.
+- **USD/INR** comes from yfinance, then FreeCurrencyAPI (`FREECURRENCYAPI_KEY`); with neither, the signal stops and
+  alerts rather than guessing a rate.
+
+Scheduling is those commands at fixed times (Task Scheduler on Windows, cron elsewhere). The scrapers use a headed
+browser, so the machine needs a logged-in desktop session.
+
 ## Telegram alerts
 
 `python -m app.telegram_bot` sends the signal to your Telegram chat. It refuses a

@@ -5,6 +5,8 @@ its numbers are illustrative, not backtested: the FX conversion and the expiry d
 are assumptions to confirm against your live option chain.
 """
 from datetime import date, datetime, timedelta
+from math import exp, log, sqrt
+from statistics import NormalDist
 from zoneinfo import ZoneInfo
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -14,8 +16,8 @@ DELTA_DEFAULT = (0.60, 0.70)
 DELTA_HIGH_OVX = (0.80, 0.85)
 OVX_DEEPEN_ABOVE = 35.0        # strictly above: deepen to delta 0.80-0.85
 
-# MCX Crude Oil (100 bbl) FUTURES expiry dates, from MCX's contract launch calendar
-# (Circular MCX/TRD/319/2025, 27 Jun 2025). They are NOT a fixed day of the month: the 19th is common but
+# MCX Crude Oil FUTURES expiry dates, from MCX's contract launch calendar (Circular MCX/TRD/319/2025,
+# 27 Jun 2025). The 100 bbl and the 10 bbl mini contracts share the same dates, so one table serves both. They are NOT a fixed day of the month: the 19th is common but
 # 2026 has the 16th, 18th, 20th and 21st too (weekends and the NYMEX-linked calendar decide).
 # The calendar for 2027 is not loaded: add it here when MCX publishes it.
 FUTURES_EXPIRY_CALENDAR = {
@@ -26,11 +28,36 @@ FUTURES_EXPIRY_CALENDAR = {
 }
 FALLBACK_EXPIRY_DAY = 19       # a month missing from the calendar: guess the 19th (or the business day before)
 OPTION_LEAD_BUSINESS_DAYS = 2  # MCX: options expire two business days before the underlying futures (its spec)
-HOLIDAYS = frozenset()         # MCX trading holidays (datetime.date). Empty: only weekends are skipped, so a
-                               # holiday near expiry would shift the real date by a day. Fill in from the MCX list.
+# MCX trading holidays for 2026, from MCX's Market Operations > Trading Holidays page:
+# {date: (name, morning session open, evening session open)}. Morning is 9:00-17:00, evening 17:00-23:30/23:55.
+# Most holidays close only the morning session and the evening (which is when the EIA report prints) trades.
+# A footnote adds Muhurat trading on Sunday 8 Nov 2026 (timings to be notified) - not modelled.
+# The 2027 list is not loaded: add it when MCX publishes it.
+MCX_HOLIDAYS_2026 = {
+    date(2026, 1, 1): ("New Year Day", True, False),
+    date(2026, 1, 26): ("Republic Day", False, False),
+    date(2026, 3, 3): ("Holi", False, True),
+    date(2026, 3, 26): ("Shri Ram Navmi", False, True),
+    date(2026, 3, 31): ("Shri Mahavir Jayanti", False, True),
+    date(2026, 4, 3): ("Good Friday", False, False),
+    date(2026, 4, 14): ("Dr. Baba Saheb Ambedkar Jayanti", False, True),
+    date(2026, 5, 1): ("Maharashtra Day", False, True),
+    date(2026, 5, 28): ("Bakri Id", False, True),
+    date(2026, 6, 26): ("Moharram", False, True),
+    date(2026, 9, 14): ("Ganesh Chaturthi", False, True),
+    date(2026, 10, 2): ("Mahatma Gandhi Jayanti", False, False),
+    date(2026, 10, 20): ("Dassera", False, True),
+    date(2026, 11, 10): ("Diwali-Balipratipada", False, True),
+    date(2026, 11, 24): ("Guru Nanak Jayanti", False, True),
+    date(2026, 12, 25): ("Christmas", False, False),
+}
+# Days with BOTH sessions closed are not business days for the expiry count. A day with any session open
+# counts as one (an assumption: MCX's rule for "business day" is not stated in the specifications).
+HOLIDAYS = frozenset(day for day, (_, morning, evening) in MCX_HOLIDAYS_2026.items() if not morning and not evening)
+STRIKE_INTERVAL = 50           # Rs per barrel between strikes (MCX option spec; the earlier pipeline also checked
+                               # it against Zerodha's public instrument master: every gap was exactly 50)
 ROLL_WITHIN_DAYS = 5           # runbook: current month only if MORE than 5 days remain
 CONTRACT_BARRELS = {"CRUDEOIL": 100, "CRUDEOILM": 10}   # barrels per lot: the exchange's contract sizes
-                               # (CRUDEOILM is the mini contract; confirm it is what you actually trade)
 STOP_BRACKET_USD = (0.18, 0.25, 0.35)   # runbook stop range: min $0.18-$0.35 on the futures
 FUTURES_BAND_PCT = 4.0         # MCX crude futures daily price limit; widens to 6% then 9% (MCX leaflet)
 NEAR_BAND_SHARE = 0.75         # a move this close to the band is worth a warning
@@ -38,6 +65,11 @@ NEAR_BAND_SHARE = 0.75         # a move this close to the band is worth a warnin
 RELEASE_ET = (10, 30)          # EIA WPSR, 10:30 AM New York time (DST-aware)
 TIME_STOP_MIN = 35             # runbook: 35 minutes post-release
 HARD_EXIT_AFTER_H = 2.5        # runbook: 10:30 PM IST when the release is 8:00 PM IST
+HARD_EXIT_BEFORE_CLOSE_MIN = 60   # ...which is one hour before the 23:30 close: never exit later than this
+# MCX's non-agri session closes 23:30 IST while US daylight saving time is in force and 23:55 IST after it ends
+# (Circular MCX/TRD/550/2026, 29 Sep 2026: 23:55 from 2 Nov 2026 to 12 Mar 2027). It follows the US clock change.
+SESSION_CLOSE_US_DST = (23, 30)
+SESSION_CLOSE_US_STANDARD = (23, 55)
 CHOP_EXIT_MIN = 4              # options: halved from the futures runbook's 8
 
 
@@ -61,6 +93,16 @@ def _business_days_before(day, count):
         while not _is_business_day(day):
             day -= timedelta(days=1)
     return day
+
+
+def mcx_evening_session(day):
+    """(open, reason): whether MCX's evening session (17:00 to the close) trades on `day`. The EIA report prints
+    in it, so a closed evening means the signal cannot be traded that day. `reason` names the holiday or
+    'weekend'; None when open. Only 2026 holidays are loaded."""
+    if day.weekday() >= 5:
+        return False, "weekend"
+    name, _, evening_open = MCX_HOLIDAYS_2026.get(day, (None, True, True))
+    return (True, None) if evening_open else (False, name)
 
 
 def futures_expiry(year, month):
@@ -102,6 +144,42 @@ def pick_expiry(release_day):
             "expiry_source": "mcx_calendar" if expiry_is_known(expiry.year, expiry.month) else "assumed_19th"}
 
 
+_NORMAL = NormalDist()
+
+
+def black76_delta(futures, strike, iv, days, option_type):
+    """Black-76 delta (r = 0) of a call (positive) or put (negative); `iv` a fraction, `days` to expiry."""
+    spread = iv * sqrt(days / 365)
+    d1 = (log(futures / strike) + 0.5 * spread * spread) / spread
+    return _NORMAL.cdf(d1) if option_type == "CALL" else _NORMAL.cdf(d1) - 1
+
+
+def strike_for_delta(futures, iv, days, delta, option_type):
+    """The strike (unrounded) whose Black-76 delta magnitude is `delta` (a call: above 0.5 means below the
+    futures price; a put: above 0.5 means above it)."""
+    spread = iv * sqrt(days / 365)
+    d1 = _NORMAL.inv_cdf(delta) if option_type == "CALL" else -_NORMAL.inv_cdf(delta)
+    return futures * exp(-(d1 * spread - 0.5 * spread * spread))
+
+
+def round_strike(strike):
+    return int(round(strike / STRIKE_INTERVAL) * STRIKE_INTERVAL)
+
+
+def strike_guidance(futures_inr, iv_pct, days, delta_range, option_type):
+    """Where the target-delta strikes should sit, since no option chain is available. An ESTIMATE: Black-76
+    with the CBOE OVX standing in for MCX implied volatility, the futures price approximated as WTI x USD/INR,
+    rounded to the Rs 50 strike interval. Confirm every number on the live chain."""
+    iv = iv_pct / 100
+    guide = {"futures_level_inr": round(futures_inr), "atm_strike": round_strike(futures_inr),
+             "iv_used_pct": iv_pct, "days_to_expiry": days}
+    for label, delta in zip(("delta_low", "delta_high"), delta_range):
+        strike = round_strike(strike_for_delta(futures_inr, iv, days, delta, option_type))
+        guide[f"strike_at_{label}"] = strike
+        guide[f"delta_at_{label}_strike"] = round(abs(black76_delta(futures_inr, strike, iv, days, option_type)), 2)
+    return guide
+
+
 def sizing(lots_by_contract, usd_inr, delta_range):
     """What the lots you trade lose in INR if the option's stop is hit, per contract and for each
     futures stop in the runbook's $0.18-$0.35 bracket, at the middle of the delta range:
@@ -136,12 +214,24 @@ def band_context(move_inr, futures_inr):
             "near_band": share >= NEAR_BAND_SHARE}
 
 
+def session_close(day):
+    """(hour, minute) IST when MCX's crude session closes on `day`: 23:30 in US daylight saving time,
+    23:55 after it ends. Uses the US clock on that day, which matches the circular's 2 Nov 2026 to
+    12 Mar 2027 window (the US changes on Sundays, MCX applies it from the Monday)."""
+    noon = datetime(day.year, day.month, day.day, 12, 0, tzinfo=NEW_YORK)
+    return SESSION_CLOSE_US_DST if noon.dst() else SESSION_CLOSE_US_STANDARD
+
+
 def release_schedule(release_day):
-    """IST clock for the release day: the print (10:30 ET, so 20:00 IST in US summer time and
-    21:00 IST in winter), the 35-minute time stop and the hard exit 2.5 h after the print."""
+    """IST clock for the release day: the print (10:30 ET, so 20:00 IST in US summer time and 21:00 IST in
+    winter), the 35-minute time stop, the session close, and the hard exit: 2.5 h after the print but never
+    later than one hour before the close (22:30 in summer; 22:55 in winter, when 2.5 h would be 23:30)."""
     release = datetime(release_day.year, release_day.month, release_day.day, *RELEASE_ET, tzinfo=NEW_YORK)
+    close = datetime(release_day.year, release_day.month, release_day.day, *session_close(release_day), tzinfo=IST)
+    hard_exit = min(release + timedelta(hours=HARD_EXIT_AFTER_H), close - timedelta(minutes=HARD_EXIT_BEFORE_CLOSE_MIN))
     at = lambda moment: moment.astimezone(IST).strftime("%H:%M")  # noqa: E731
     return {"release_ist": at(release),
             "time_stop_ist": at(release + timedelta(minutes=TIME_STOP_MIN)),
-            "hard_exit_ist": at(release + timedelta(hours=HARD_EXIT_AFTER_H)),
+            "hard_exit_ist": at(hard_exit),
+            "session_close_ist": at(close),
             "chop_exit_min": CHOP_EXIT_MIN}
