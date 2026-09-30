@@ -52,5 +52,11 @@
     "crude_surprise_mb": 3.669,
     "gasoline_surprise_mb": -1.786,
     "distillate_surprise_mb": 0.172
+  },
+  {
+    "release_date": "30-09-2026",
+    "crude_surprise_mb": 1.222,
+    "gasoline_surprise_mb": -1.184,
+    "distillate_surprise_mb": -2.051
   }
 ]

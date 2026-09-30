@@ -1,0 +1,69 @@
+{
+  "release_date": "30-09-2026",
+  "generated_at": "01-10-2026 01:14",
+  "inputs": {
+    "crude_consensus_mb": -0.3,
+    "gasoline_consensus_mb": -0.5,
+    "distillate_consensus_mb": -0.2,
+    "crude_change_mb": 0.922,
+    "cushing_change_mb": 0.553,
+    "cushing_level_mb": 24.301,
+    "gasoline_change_mb": -1.684,
+    "distillate_change_mb": -2.251,
+    "refinery_util_change_pct": -1.5,
+    "api_crude_mb": 1.019,
+    "atr_20": 4.936,
+    "ovx": 53.94,
+    "usd_inr": 95.82,
+    "usd_inr_source": "yfinance"
+  },
+  "calculations": {
+    "crude_surprise_mb": 1.222,
+    "gasoline_surprise_mb": -1.184,
+    "distillate_surprise_mb": -2.051,
+    "omega_gasoline": 0.8,
+    "omega_distillate": 0.5,
+    "tls_mb": -0.751,
+    "sigma_forecast_mb": 4.558,
+    "sigma_method": "mad",
+    "z_tls": -0.16,
+    "cushing_contradicts": false,
+    "cushing_status": "immaterial",
+    "cushing_multiplier": 1.356,
+    "regime3_setup": false,
+    "overnight_rally_usd": 2.3,
+    "cushing_level_known": true,
+    "api_surprise_mb": 1.319,
+    "api_aligns": false,
+    "beta_vol": 0.662
+  },
+  "signal": {
+    "action": "stand_down",
+    "regime": null,
+    "direction": "neutral",
+    "option_type": "NONE",
+    "strike_type": "NONE"
+  },
+  "expected_move": null,
+  "option": null,
+  "currency": null,
+  "sizing": null,
+  "scorecard": {
+    "backwardation": true,
+    "crack_321": true,
+    "brent_wti": true,
+    "api_prepositioned": false
+  },
+  "schedule": {
+    "release_ist": "20:00",
+    "time_stop_ist": "20:35",
+    "hard_exit_ist": "22:30",
+    "session_close_ist": "23:30",
+    "chop_exit_min": 4,
+    "mcx_evening_open": true,
+    "mcx_closed_reason": null
+  },
+  "checklist": [],
+  "analysis": "",
+  "model_used": "rule_based"
+}
