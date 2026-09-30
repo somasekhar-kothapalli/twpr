@@ -1,0 +1,48 @@
+name: TWPR Natural Gas Record
+
+# Passive recorder for the EIA natural gas storage report (Thursday 10:30 New York). Records only: no signal,
+# no trade. 17:00 UTC is 22:30 IST: an hour and a half after the print in winter (15:30 UTC) and two and a half in
+# summer (14:30 UTC), so the 60-minute price path is complete in both. EIA moves some reports (2026: Fri 13 Nov,
+# Wed 25 Nov at 12:00 ET), so it also runs Wednesday and Friday: each run records the latest released report and
+# is idempotent, and a run that finds nothing new changes nothing. On Wed 25 Nov the noon print is at 17:00 UTC,
+# so that week is captured by the Thursday 26 Nov run (Yahoo still has the 1-minute bars).
+on:
+  schedule:
+    - cron: "0 17 * * 3-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: twpr-data
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
+
+      - name: Record the storage report
+        run: xvfb-run -a python -m app.ng_recorder
+
+      - name: Commit data
+        if: success()
+        run: |
+          git config user.name  "twpr-bot"
+          git config user.email "twpr-bot@users.noreply.github.com"
+          git add -f data/ng_record.json
+          git diff --staged --quiet || git commit -m "data: natural gas storage record"
+          git pull --rebase && git push

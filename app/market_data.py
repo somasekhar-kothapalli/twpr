@@ -57,6 +57,16 @@ def atr(bars, days=ATR_DAYS):
     return sum(ranges[-days:]) / days
 
 
+def atr_1m(bars):
+    """Mean 1-minute true range over `bars` [(high, low, close)] (the last ~5 sessions): the size of a normal
+    one-minute swing, which sets how wide a real stop must be. The overnight gap between sessions adds a
+    handful of large ranges to a few thousand, so the mean is only slightly high."""
+    ranges = true_ranges(bars)
+    if len(ranges) < 100:
+        raise ValueError(f"need at least 100 one-minute bars for a 1-minute ATR, got {len(bars)}")
+    return sum(ranges) / len(ranges)
+
+
 def crack_321(wti, rbob, heating_oil):
     """3:2:1 crack: (2 gasoline + 1 distillate - 3 crude) / 3, products converted to USD/bbl."""
     return (2 * rbob * BARRELS_PER_GALLON + heating_oil * BARRELS_PER_GALLON - 3 * wti) / 3
@@ -193,6 +203,12 @@ def fetch_market(today=None, asof=None):
         if pair is None:
             raise RuntimeError("could not identify the front contract")
         return round(pair[0] - pair[1], 2)
+
+    def minute_atr():   # Yahoo keeps 1-minute bars for about a week; a replay has none for the past
+        import yfinance as yf
+        frame = yf.Ticker("CL=F").history(period="5d", interval="1m", timeout=FETCH_TIMEOUT_S).dropna()
+        return round(atr_1m([(float(r.High), float(r.Low), float(r.Close)) for r in frame.itertuples()]), 3)
+    market["atr_1m"] = None if asof is not None else optional("1-minute ATR", minute_atr)
 
     market["cl1_cl2"] = optional("CL1-CL2", spread)
     market["brent_wti"] = optional("Brent-WTI", lambda: round(last_close("BZ=F", before)[0] - wti, 2))

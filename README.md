@@ -8,7 +8,7 @@ A weekly **alert-and-record system** for buying MCX crude oil options around the
 |---|---|
 | **Instrument** | MCX `CRUDEOIL` (100 bbl) and `CRUDEOILM` (10 bbl mini), European options, **buyer only**, ITM, exited the same evening |
 | **Event** | EIA WPSR, Wednesdays 10:30 New York (20:00 IST in summer, 21:00 IST in winter) |
-| **Version** | v0.1: crude only, alert-and-record. Scope and completion criteria in [docs/V0_1_SCOPE.md](docs/V0_1_SCOPE.md) |
+| **Version** | v0.1: crude only, alert-and-record ([docs/V0_1_SCOPE.md](docs/V0_1_SCOPE.md)). v0.2 (natural gas): a passive recorder only, no signal or trade ([docs/V0_2_SCOPE.md](docs/V0_2_SCOPE.md)) |
 | **Stack** | Python 3.12, Playwright, BeautifulSoup, httpx, yfinance, Groq (optional prose), Telegram, GitHub Actions |
 
 ---
@@ -177,6 +177,8 @@ sequenceDiagram
 |---|---|---|
 | `twpr_pre.yml` | Wed 13:30 | `app.run pre` |
 | `twpr_print.yml` | Wed 14:30, 14:31, 14:32 | Skip if today's signal exists; redo pre if consensus missing; `app.run print` |
+| `twpr_crude_record.yml` | Wed and Thu 17:30 | Crude weekly recorder: every release's decision and WTI price path, traded or not (records only) |
+| `twpr_ng_record.yml` | Thu 17:00 | Natural gas storage recorder (records only, see below) |
 
 - Jobs use `environment: production`; put secrets and variables in that GitHub environment (and do not add required reviewers, which would block the unattended run).
 - **Secrets:** `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `FREECURRENCYAPI_KEY`, `GROQ_API_KEY`.
@@ -187,6 +189,10 @@ sequenceDiagram
 - `data/*` is git-ignored, so the workflows use `git add -f` for the specific files they own.
 
 ---
+
+### Natural gas (v0.2): record only
+
+`python -m app.ng_recorder` writes each Thursday's EIA storage print to `data/ng_record.json`: the actual, both consensus panels, EIA's storage table (net change against implied flow, stocks against the 5-year average) and NG=F's price at 0 to 60 minutes after the print. It makes no signal and sends no alert unless it fails. An 8-print check found no support for the assumed price response, so the model waits for a real sample (about 20-26 weeks). `--backfill` loads the releases still listed; `--show` prints surprises against price moves. Details and MCX contract facts: [docs/NATURAL_GAS_MCX_FACTS.md](docs/NATURAL_GAS_MCX_FACTS.md).
 
 ## 5. Data contract
 
@@ -201,6 +207,8 @@ Every file is written by exactly one script and read by the engine. File names l
 | `surprise_history.json` | `surprise_history` | weekly surprises; sets sigma; the engine appends each live week |
 | `signal.json` | `signal_engine` | the decision, option, expected move, sizing, schedule, checklist |
 | `journal.json` | `journal` | your fills and post-print price paths (local only, never in CI) |
+| `crude_record.json` | `crude_recorder` | every Wednesday: the decision (TLS, Z, regime) and WTI's path 0-60 minutes after the print |
+| `ng_record.json` | `ng_recorder` | natural gas storage prints and price paths (record only) |
 
 Consensus and actuals must share one release date; the API report must be the Tuesday before; files older than 2 days are refused unless `--allow-stale`.
 
@@ -268,6 +276,7 @@ python -m app.surprise_history --backfill   # one-off: past weekly surprises
 python -m app.journal fill ...              # log a fill; slippage and estimated net
 python -m app.journal path                  # WTI at 0/1/2/5/10/15/30/60 min after the print
 python -m app.journal show                  # wins, net, slippage, move by minute
+python -m app.crude_recorder --show         # every recorded week: does the surprise predict direction, and how much per mb
 ```
 
 `run` executes each stage as its own process and stops at the first failure with a Telegram alert naming what was skipped.

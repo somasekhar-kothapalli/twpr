@@ -30,7 +30,7 @@ import httpx
 
 from dotenv import load_dotenv
 
-from app import currency, model, options
+from app import currency, model, ng_options, options
 from app.surprise_history import load_history, record_week
 from app.utils.common import (API_REPORT_FILE, CONSENSUS_FILE, DATA_DIR, EIA_ACTUALS_FILE, MARKET_FILE,
                               ROOT, SIGNAL_FILE, SURPRISE_HISTORY_FILE, env, fmt_ts, is_stale, now_ist,
@@ -72,6 +72,10 @@ ALWAYS_CHECK = [
     "The lot table assumes the option loses delta x the futures stop. It ignores the IV crush after the "
     "print (vega): size below the table until you have measured real fills.",
 ]
+ATR_STOP_MULTIPLE = 1.5        # runbook stop: 1.5 x the 1-minute ATR
+DEEP_STRIKE_CHECK = ("Deep-ITM strike (delta 0.80-0.85): the books there can be thin. If its bid/ask spread is "
+                     "wide, step down to the 0.65-0.70 delta strike rather than paying it; the journal slippage "
+                     "will show what 'wide' costs.")
 TIME_SPREAD_CHECK = ("Bullish only: a flat-price rally of $0.40 or more needs CL1-CL2 to widen $0.02-$0.04, "
                      "otherwise reject the long.")
 REGIME_CHECK = {
@@ -120,7 +124,12 @@ def _load_dated(path, label):
 
 def _num(data, key):
     value = data.get(key)
-    return None if value is None else round(float(value), 3)
+    if value is None:
+        return None
+    try:
+        return round(float(value), 3)
+    except (TypeError, ValueError):
+        raise InputError("Invalid value", f"{key}={value!r} is not a number") from None
 
 
 MANDATORY = (("crude_consensus_mb", CONSENSUS_FILE), ("gasoline_consensus_mb", CONSENSUS_FILE),
@@ -194,6 +203,9 @@ def load_market(data_dir=None, today=None, allow_stale=False):
 LOT_SIZE_SETTINGS = {"CRUDEOIL": "MCX_CRUDEOIL_LOT_SIZE", "CRUDEOILM": "MCX_CRUDEOILM_LOT_SIZE",
                      "NATURALGAS": "MCX_NATURALGAS_LOT_SIZE", "NATURALGASM": "MCX_NATURALGASM_LOT_SIZE"}
 LOT_COUNT_SETTINGS = {"CRUDEOIL": "MCX_CRUDEOIL_LOTS", "CRUDEOILM": "MCX_CRUDEOILM_LOTS"}
+# Natural gas is record-only (docs/V0_2_SCOPE.md): its lot counts are validated but kept apart, so the crude
+# sizing never sees them.
+NG_LOT_COUNT_SETTINGS = {"NATURALGAS": "MCX_NATURALGAS_LOTS", "NATURALGASM": "MCX_NATURALGASM_LOTS"}
 
 
 def _whole_number(name, what):
@@ -212,15 +224,17 @@ def _whole_number(name, what):
 
 def load_lot_sizes():
     """{contract: barrels (or mmBtu) per lot or None}: the exchange's contract sizes, from MCX_CRUDEOIL_LOT_SIZE
-    (100 bbl), MCX_CRUDEOILM_LOT_SIZE (10 bbl) and, reserved for a future setup, MCX_NATURALGAS_LOT_SIZE and
-    MCX_NATURALGASM_LOT_SIZE. A crude value that is not the contract size MCX publishes is refused: the usual
+    (100 bbl), MCX_CRUDEOILM_LOT_SIZE (10 bbl), MCX_NATURALGAS_LOT_SIZE (1250 MMBtu) and MCX_NATURALGASM_LOT_SIZE
+    (250 MMBtu; natural gas is record-only, nothing reads them). A value that is not the contract size MCX publishes is refused: the usual
     cause is putting the NUMBER OF LOTS here (that goes in MCX_CRUDEOIL_LOTS / MCX_CRUDEOILM_LOTS)."""
     sizes = {contract: _whole_number(name, "barrels") for contract, name in LOT_SIZE_SETTINGS.items()}
     for contract, size in sizes.items():
-        expected = options.CONTRACT_BARRELS.get(contract)
+        expected = options.CONTRACT_BARRELS.get(contract) or ng_options.CONTRACT_MMBTU.get(contract)
         if size is not None and expected is not None and size != expected:
+            unit = "barrels" if contract in options.CONTRACT_BARRELS else "MMBtu"
+            counts = {**LOT_COUNT_SETTINGS, **NG_LOT_COUNT_SETTINGS}
             raise InputError("Invalid setting", f"{LOT_SIZE_SETTINGS[contract]}={size}: MCX's {contract} lot is {expected} "
-                             f"barrels. To set how many lots you trade, use {LOT_COUNT_SETTINGS[contract]}.")
+                             f"{unit}. To set how many lots you trade, use {counts[contract]}.")
     return sizes
 
 
@@ -230,12 +244,28 @@ def load_lot_counts():
     return {contract: _whole_number(name, "lots") for contract, name in LOT_COUNT_SETTINGS.items()}
 
 
+def load_ng_lot_counts():
+    """{contract: lots or None} from MCX_NATURALGAS_LOTS and MCX_NATURALGASM_LOTS. Nothing uses them yet."""
+    return {contract: _whole_number(name, "lots") for contract, name in NG_LOT_COUNT_SETTINGS.items()}
+
+
 def sigma_method():
     """SIGMA_METHOD from .env: "mad" (default, robust) or "std" (plain std dev)."""
     method = (env("SIGMA_METHOD", "mad") or "mad").lower()
     if method not in model.SIGMA_METHODS:
         raise InputError("Invalid setting", f"SIGMA_METHOD={method!r} must be one of {model.SIGMA_METHODS}")
     return method
+
+
+def load_center(release_date, data_dir=None):
+    """The median weekly TLS of the last 12 weeks (excluding the week traded), or None if there is too little
+    history. Informational: the demeaned Z shown beside the raw one."""
+    data_dir = data_dir or DATA_DIR
+    history = [r for r in load_history(data_dir / SURPRISE_HISTORY_FILE.name) if r["release_date"] != release_date]
+    try:
+        return model.tls_center(history)
+    except ValueError:
+        return None
 
 
 def load_sigma(release_date, data_dir=None, method="mad"):
@@ -372,8 +402,9 @@ def scorecard(market, api_surprise):
 
 
 def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
-                 analyse=generate_analysis, generated_at=None, sigma_method="mad"):
-    """The full signal.json payload from validated inputs, market data and sigma_forecast."""
+                 analyse=generate_analysis, generated_at=None, sigma_method="mad", tls_center=None):
+    """The full signal.json payload from validated inputs, market data and sigma_forecast. `tls_center` (the
+    median recent TLS) only adds the informational demeaned Z."""
     release_day = parse_release_date(inputs["release_date"])
     month = release_day.month
     surprises = {
@@ -401,11 +432,14 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
         "cushing_multiplier": round(multiplier, 3),
         "regime3_setup": setup3, "overnight_rally_usd": rally,
         "cushing_level_known": inputs["cushing_level_mb"] is not None,
-        "api_surprise_mb": api_surprise, "api_aligns": (tls > 0) == (inputs["api_crude_mb"] > 0),
+        "api_surprise_mb": api_surprise, "api_aligns": (api_surprise > 0) == (surprises["crude"] > 0),   # API vs EIA crude surprise (both against consensus)
         "beta_vol": round(beta, 3),
+        "tls_center_mb": None if tls_center is None else round(tls_center, 3),
+        "z_tls_demeaned": None if tls_center is None else round((tls - tls_center) / sigma, 2),
     }
     signal = {"action": "trade" if regime else "stand_down", "regime": regime, "direction": direction,
-              "option_type": "NONE", "strike_type": "NONE"}
+              "option_type": "NONE", "strike_type": "NONE",
+              "reason": None if regime else "z_below_gate"}   # why it is a stand-down (None for a trade)
     move = option = sizing = None
     checklist = []
     if regime:
@@ -419,7 +453,11 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
                 market["wti"] * usd_inr, market["ovx"], max(option["days_to_expiry"], 1), (low, high),
                 signal["option_type"])
         if lots:   # {contract: lots} for the contracts you configured
-            sizing = options.sizing(lots, usd_inr, (low, high))
+            atr_stop = round(ATR_STOP_MULTIPLE * market["atr_1m"], 2) if market.get("atr_1m") else None
+            wide = atr_stop is not None and atr_stop > max(options.STOP_BRACKET_USD)  # a normal swing beats the bracket
+            sizing = options.sizing(lots, usd_inr, (low, high),
+                                    (*options.STOP_BRACKET_USD, atr_stop) if wide else options.STOP_BRACKET_USD)
+            sizing["atr_1m_stop_usd"] = atr_stop if wide else None
         if regime == 1:   # Regimes 2 and 3 target chart levels, not a modelled move
             usd = model.expected_move_usd(tls, beta, multiplier)
             anchor = model.anchor_move_usd(tls)
@@ -428,7 +466,9 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
                     "anchor_low_usd": anchor[0], "anchor_high_usd": anchor[1],
                     "anchor_low_inr": int(round(anchor[0] * usd_inr)), "anchor_high_inr": int(round(anchor[1] * usd_inr)),
                     "band": options.band_context(anchor[1] * usd_inr, market["wti"] * usd_inr) if market.get("wti") else None}
-        checklist = REGIME_CHECK[regime] + ([TIME_SPREAD_CHECK] if regime == 1 and direction == "bullish" else [])             + ALWAYS_CHECK
+        checklist = REGIME_CHECK[regime] + ([TIME_SPREAD_CHECK] if regime == 1 and direction == "bullish" else []) + ALWAYS_CHECK
+        if option["ovx_deepened"]:
+            checklist.append(DEEP_STRIKE_CHECK)
         if option["expiry_source"] != "mcx_calendar":
             checklist.insert(0, f"The expiry date {option['expiry_date']} is a GUESS (that month is not in the MCX "
                              "calendar loaded: the 19th, or the business day before): check it on your chain.")
@@ -442,6 +482,8 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
     if regime and not evening_open:
         checklist.insert(0, f"MCX's EVENING SESSION IS CLOSED on {inputs['release_date']} ({closed_reason}): "
                             "this signal cannot be traded today.")
+        # Anything that reads only `action` must not act on it: regime/direction stay for the record.
+        signal["action"], signal["reason"] = "stand_down", f"mcx_evening_closed: {closed_reason}"
     fx = {"usd_inr": round(usd_inr, 2), "usd_inr_source": usd_inr_source}
 
     if regime:
@@ -483,7 +525,8 @@ def main(argv=None):
         if not lots:
             logger.warning("MCX_CRUDEOIL_LOTS / MCX_CRUDEOILM_LOTS not set - no lot count in the signal")
         usd_inr, source = fetch_usd_inr()
-        signal = build_signal(inputs, market, sigma, usd_inr, source, lots=lots or None, sigma_method=method)
+        signal = build_signal(inputs, market, sigma, usd_inr, source, lots=lots or None, sigma_method=method,
+                              tls_center=load_center(inputs["release_date"]))
         write_json(SIGNAL_FILE, signal)
         record_week(inputs, inputs)   # this week's surprises join the history (no-op if already there)
         s, c = signal["signal"], signal["calculations"]

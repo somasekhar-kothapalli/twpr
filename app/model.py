@@ -68,6 +68,16 @@ def sigma_forecast(history, weeks=SIGMA_WEEKS, min_weeks=SIGMA_MIN_WEEKS, method
     return spread
 
 
+def tls_center(history, weeks=SIGMA_WEEKS, min_weeks=SIGMA_MIN_WEEKS):
+    """Median weekly TLS of the last `weeks` weeks: where the surprises have been centred. Z assumes it is 0, which
+    holds only if consensus is unbiased. INFORMATIONAL: it feeds `z_tls_demeaned`, never the gate. ValueError if
+    fewer than `min_weeks` weeks exist."""
+    recent = sorted(history, key=lambda r: datetime.strptime(r["release_date"], DATE_FORMAT))[-weeks:]
+    if len(recent) < min_weeks:
+        raise ValueError(f"tls_center needs {min_weeks} weeks of surprise history, have {len(recent)}")
+    return statistics.median(history_tls(r) for r in recent)
+
+
 def z_score(tls_value, sigma):
     return tls_value / sigma
 

@@ -71,8 +71,9 @@ def test_regime_2_says_targets_are_chart_levels():
 
 def test_a_closed_evening_session_is_a_loud_line_in_the_message():
     text = tb.format_signal(signal(release_date="26-01-2026", crude_change_mb=12.0))
-    assert "!! MCX EVENING SESSION CLOSED on 26-01-2026 (Republic Day): you cannot trade this today" in text
-    assert "EVENING SESSION CLOSED" not in tb.format_signal(signal())
+    assert "STAND DOWN" in text and "cannot be traded: MCX's evening session is closed (Republic Day)" in text
+    assert "Regime 1 bearish" in text and "inside the 1.25 sigma noise band" not in text
+    assert "evening session is closed" not in tb.format_signal(signal())
 
 
 def test_an_assumed_expiry_is_marked_in_the_message():

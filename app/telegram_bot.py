@@ -29,6 +29,14 @@ def _mb(value):
     return f"{value:+.3f} mb" if value is not None else "N/A"
 
 
+def _demeaned(calc):
+    """The demeaned Z, informational: Z assumes the surprises centre on 0, and they have not."""
+    if calc.get("z_tls_demeaned") is None:
+        return []
+    return [f"Z demeaned {calc['z_tls_demeaned']:+.2f} (recent median TLS {calc['tls_center_mb']:+.2f} mb; "
+            "informational, the gate uses the raw Z)"]
+
+
 def _format_sizing(sizing):
     if not sizing:
         return ["Lots: set MCX_CRUDEOIL_LOTS (or MCX_CRUDEOILM_LOTS) in .env to see what your lots risk"]
@@ -37,6 +45,8 @@ def _format_sizing(sizing):
         risk = " | ".join(f"${stop}: {inr:,}" for stop, inr in block["risk_inr_by_futures_stop_usd"].items())
         lines += [f"{name}: {block['lots']} lots x {block['barrels_per_lot']} bbl | INR lost if the option stop is hit, "
                   "by futures stop:", f"  {risk}"]
+    if sizing.get("atr_1m_stop_usd"):
+        lines.append(f"  (${sizing['atr_1m_stop_usd']:.2f} = 1.5 x the recent 1-minute ATR: wider than the runbook bracket)")
     return lines
 
 
@@ -51,12 +61,15 @@ def format_signal(signal, replay_days=None):
     surprises = (f"crude {calc['crude_surprise_mb']:+.3f} | gasoline {calc['gasoline_surprise_mb']:+.3f} | "
                  f"distillate {calc['distillate_surprise_mb']:+.3f}")
     if trade["action"] == "stand_down":
+        closed = (trade.get("reason") or "").startswith("mcx_evening_closed")
+        why = ("the signal (Regime %s %s) cannot be traded: MCX's evening session is closed (%s)."
+               % (trade["regime"], trade["direction"], trade["reason"].split(": ", 1)[-1])) if closed             else "inside the 1.25 sigma noise band."
         lines += [
             f"{NEUTRAL} TWPR - STAND DOWN",
             f"Release {signal['release_date']}",
             "",
-            f"TLS {calc['tls_mb']:+.3f} mb, Z {calc['z_tls']:+.2f} (sigma {calc['sigma_forecast_mb']:.3f}): "
-            "inside the 1.25 sigma noise band.",
+            f"TLS {calc['tls_mb']:+.3f} mb, Z {calc['z_tls']:+.2f} (sigma {calc['sigma_forecast_mb']:.3f}): " + why,
+            *_demeaned(calc),
             f"Surprises: {surprises}",
             "No position this week.",
         ]
@@ -71,6 +84,7 @@ def format_signal(signal, replay_days=None):
             f"Release {signal['release_date']} (generated {signal['generated_at']} IST)",
             "",
             f"TLS {calc['tls_mb']:+.3f} mb | Z {calc['z_tls']:+.2f} (sigma {calc['sigma_forecast_mb']:.3f})",
+            *_demeaned(calc),
             f"Surprises: {surprises}",
             f"Cushing: {_mb(inputs['cushing_change_mb'])} ({cushing})"
             + (f", level {level:.1f} mb, x{calc['cushing_multiplier']:.2f}" if level is not None else ", level unknown"),

@@ -21,6 +21,8 @@ MARKET_FILE = DATA_DIR / "market.json"            # market_data       -> signal_
 SURPRISE_HISTORY_FILE = DATA_DIR / "surprise_history.json"  # surprise_history -> signal_engine (sigma_forecast)
 SIGNAL_FILE = DATA_DIR / "signal.json"            # signal_engine
 JOURNAL_FILE = DATA_DIR / "journal.json"          # journal (your own fills and the post-print price paths)
+CRUDE_RECORD_FILE = DATA_DIR / "crude_record.json"  # crude_recorder (every Wednesday: decision + post-print price path)
+NG_RECORD_FILE = DATA_DIR / "ng_record.json"    # ng_recorder (natural gas storage prints and price paths; v0.2, record only)
 DATE_FORMAT = "%d-%m-%Y"
 TIMESTAMP_FORMAT = "%d-%m-%Y %H:%M"
 
@@ -42,6 +44,17 @@ def setup_logging():
     # yfinance logs an ERROR for every symbol it cannot find (an expired futures contract is
     # normal here). Our callers handle missing data themselves and report it once, clearly.
     logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
+
+def merge_records(old, new):
+    """`new` over `old`, but a None (or empty dict) in `new` never erases something already recorded, so a
+    later run that got less data than an earlier one cannot make the record worse."""
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return old if new is None else new
+    merged = dict(old)
+    for key, value in new.items():
+        merged[key] = merge_records(old.get(key), value) if key in old else value
+    return merged
 
 
 def now_utc():

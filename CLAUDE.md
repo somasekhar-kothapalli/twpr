@@ -77,6 +77,8 @@ python -m app.run all --replay 23-09-2026          # a past release end to end (
 python -m app.pre_brief --print                    # the pre-print brief, shown instead of sent
 python -m app.watch --dry-run                      # the reminder times for today's signal
 python -m app.journal fill ...                     # log a fill by hand;  path / show: post-print prices and statistics
+python -m app.crude_recorder [--date D | --seed-journal | --show]   # crude: every Wednesday's decision + price path
+python -m app.ng_recorder [--date D | --backfill | --show]   # natural gas storage record (v0.2, record only)
 
 python -m pytest tests -q                          # offline suite (default)
 python -m pytest tests -m network -k tradingeconomics   # live URL health check
@@ -332,7 +334,7 @@ the newest and wins wherever it differs from the 2024 leaflet. Source of truth f
 Reads `consensus.json`, `api_report.json`, `eia_actuals.json`, `market.json` and
 `surprise_history.json`; writes `data/signal.json`: `inputs`, `calculations`, `signal`
 (`action` trade/stand_down, `regime` 1/2/3/null, `direction`, `option_type`, `strike_type`
-ITM), `expected_move`, `option`, `sizing`, `scorecard`, `schedule`, `checklist`, `analysis`,
+ITM, `reason`: `z_below_gate` on a stand-down, `mcx_evening_closed: <holiday>` when a regime fired but MCX's evening session is closed - then `action` is `stand_down` (so nothing reading only the action acts on it) and regime/direction are kept for the record), `expected_move`, `option`, `sizing`, `scorecard`, `schedule`, `checklist`, `analysis`,
 `model_used`. No scraping. The maths is pure and lives in `model.py` (TLS, sigma, Z,
 Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `options.py`
 (delta, expiry gate, lots, DST-aware IST clock); the engine loads, validates and assembles.
@@ -402,6 +404,24 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
 - **Live finding (2026-09-30):** the history's 12-08-2026 week has a +19.9 mb TLS. With the plain
   std dev sigma was ~8.3 mb; the default MAD gives ~5.8 on the 8 prior weeks, so a trade needs
   |TLS| above ~7 mb. The 23-09 reference week (TLS +2.23) **stands down** under any method.
+- **Review follow-ups (2026-09-30, from an external review of `model.py` / `options.py`):**
+  - **Demeaned Z, informational:** `calculations.z_tls_demeaned` = (TLS minus the median of the last 12 weekly TLS) / sigma, with
+    `tls_center_mb`. Z assumes consensus is unbiased; over the 9 recorded weeks the median TLS is +2.33 mb (mean +2.61) against a
+    sigma of 4.56, about 0.5 sigma, so builds have systematically beaten consensus. It is shown beside the raw Z and **never gates**:
+    switching it on would make bearish prints need TLS ~ +8 but bullish ones only ~ -3.4, on 9 summer weeks with mixed consensus
+    panels. Compare the two over the validation weeks first.
+  - **Stop bracket vs the 1-minute ATR:** `market.json` has `atr_1m` (mean 1-minute true range, last 5 sessions, `null` in replays).
+    If 1.5 x it exceeds the runbook's $0.35, the sizing table gets an extra stop row (`sizing.atr_1m_stop_usd`). Live 2026-09-30:
+    0.105 -> 0.16, inside the bracket, so nothing is added; WTI's ~$3 daily range is not the scale of a one-minute stop.
+  - **Deep-ITM strikes:** with delta 0.80-0.85 the checklist says to step down to 0.65-0.70 if the deep strike's spread is wide. No
+    strike-count cap: 3 strikes (Rs 150) is ~1.7% ITM, which would switch the deepening off. Only the live chain and the journal's
+    slippage can set the threshold.
+  - **Not built, on purpose:** a mirror of Regime 3 (extreme bearish API, smaller EIA build, overnight selloff, so buy): the
+    runbook has no such case and there is no data to test it. The Cushing multiplier applies to both directions (low stocks may
+    amplify draws more than builds: a judgment call, unproven). API surprises under 3.0 mb are ignored by Regime 3 and the
+    history does not store the API figure, so their value cannot be tested yet.
+  - **Reminder:** the 2027 futures/options calendars and MCX holidays are not loaded (2027 expiries are a flagged guess): load
+    them when MCX publishes them, around December 2026.
 - **USD/INR** comes from `yfinance` (`INR=X`, 10 s timeout), then **FreeCurrencyAPI** as a backup
   (`FREECURRENCYAPI_KEY` in `.env`; `signal.inputs.usd_inr_source` says which answered). A quote outside 50-150
   is bad data. **There is no default rate any more:** with neither source the engine raises
@@ -444,6 +464,35 @@ week."; missing optional data reads `N/A`/`unknown`, not a crash. Runs after `si
   `REPLAY - data is N days old, NOT a live signal`. Missing/corrupt file -> error alert too.
 - Windows consoles are cp1252: never `print()` this text (emoji raise `UnicodeEncodeError`);
   the script only logs, and `setup_logging` forces UTF-8.
+
+### `app/crude_recorder.py` — every Wednesday, traded or not
+
+Writes `data/crude_record.json` (`CRUDE_RECORD_FILE`), one record per release: the decision (TLS, Z, demeaned Z, sigma,
+regime, action/reason, surprises, Cushing status, API surprise, OVX/ATR), the afternoon market snapshot and WTI's price
+path at 0/1/2/5/10/15/30/60 minutes after the 10:30 ET print (Yahoo 1-minute bars, kept ~7 days, via `journal`'s
+`fetch_print_bars`/`path_from_bars`), plus `aligned_moves` (each move times the direction the surprise implies: positive =
+WTI moved the way the surprise says). **Why:** the edge is unproven and only about one week in four clears the gate
+(~10 trades a year), far too few to test it; but every Wednesday yields a TLS and a move, so all ~50 weeks a year can
+test whether the surprise predicts direction. `--show` prints each week, then hit rate, mean aligned move and the slope
+in USD per mb (against the 0.15-0.30 anchor) at +2/5/15/30/60 minutes for all weeks and for weeks with |Z| >= 1.25.
+Fewer than about 20 weeks is not evidence. It reads the signal file (else the surprise-history row, whose TLS uses the
+investing.com panel and so differs slightly from the live one), never changes a decision, exits 0 when the signal is
+older than 2 days and there is nothing new, and alerts Telegram only on failure. `--seed-journal` copies paths already
+logged with `journal path` (23-09-2026 is seeded). Workflow `twpr_crude_record.yml`: Wed and Thu 17:30 UTC (23:00 IST,
+after the hard exit in both summer and winter). `merge_records` (in `common.py`) never lets a poorer rerun erase data.
+
+### `app/ng_recorder.py`, `app/utils/ng_storage.py` — natural gas storage record (v0.2, record only)
+
+Writes `data/ng_record.json` (`NG_RECORD_FILE`), one record per release date, merged so a later poorer run never
+erases data: actual, both consensus panels (they differ), EIA's storage table from the public
+`https://ir.eia.gov/ngs/wngsr.csv` (needs `follow_redirects`; total stocks, net change vs implied flow with a
+`reclassified` flag, the 5-year average and the % against it; the file holds only the latest week) and NG=F's price
+path after the print (1-minute bars under a week old, else 5-minute; none after ~55 days). No signal, no trade,
+alert only on failure. **Why record only:** an 8-print check found no support for the assumed 0.003-0.005 USD per Bcf
+(measured about -0.0009 at 5 minutes), so the model waits for a sample; see `docs/V0_2_SCOPE.md` and
+`docs/NATURAL_GAS_MCX_FACTS.md`. Workflow `twpr_ng_record.yml` (Thursday 17:00 UTC). `sources.INDICATORS["ng_storage"]`
+holds the slugs; storage values carry `Bcf` / `B` suffixes that `to_mb_suffixed` now reads (unit Bcf, not mb).
+`app/ng_options.py` is pure groundwork that **nothing calls yet**: the 2026 NATURALGAS futures calendar (27 Jan, 24 Feb, 26 Mar, 27 Apr, 26 May, 25 Jun, 28 Jul, 26 Aug, 25 Sep, 27 Oct, 24 Nov, 28 Dec; options two business days earlier, e.g. Fri 23 Oct), contract sizes 1250 / 250 MMBtu (MCX symbol NATGASMINI for the mini), Rs 5 strike guide, delta rule and sizing. `MCX_NATURALGAS_LOT_SIZE` / `MCX_NATURALGASM_LOT_SIZE` are validated like the crude ones and `MCX_NATURALGAS_LOTS` / `MCX_NATURALGASM_LOTS` load through `load_ng_lot_counts`, apart from the crude sizing.
 
 ### `app/run.py`, `app/pre_brief.py`, `app/watch.py`, `app/journal.py` — release day and the record
 

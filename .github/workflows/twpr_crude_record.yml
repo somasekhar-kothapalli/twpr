@@ -1,0 +1,46 @@
+name: TWPR Crude Record
+
+# Records EVERY Wednesday's crude EIA release, traded or not: the decision in the signal file plus WTI's path from
+# 10:30 New York to +60 minutes. 17:30 UTC = 23:00 IST, after the hard exit in summer (print 14:30 UTC) and winter
+# (15:30 UTC), so the hour of 1-minute bars is complete. Yahoo keeps 1-minute bars for about a week, so a missed
+# week cannot be recovered later. Thursday is included for a holiday-shifted release; a run with nothing new to
+# record exits 0 without changing anything. Records only: no alert unless it fails.
+on:
+  schedule:
+    - cron: "30 17 * * 3,4"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: twpr-data
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 15
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Record the release
+        run: python -m app.crude_recorder
+
+      - name: Commit data
+        if: success()
+        run: |
+          git config user.name  "twpr-bot"
+          git config user.email "twpr-bot@users.noreply.github.com"
+          if [ -f data/crude_record.json ]; then git add -f data/crude_record.json; fi
+          git diff --staged --quiet || git commit -m "data: crude weekly record"
+          git pull --rebase && git push
