@@ -297,7 +297,7 @@ Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `
 - **Input rules unchanged:** consensus and EIA actuals must share `release_date`; the API
   report is the Tuesday before (0-3 days earlier); files older than 2 days (API 5, market
   data by `fetched_at`) are refused unless `--allow-stale`. All three liquids' consensus and
-  actuals plus `api_crude_mb` are mandatory; Cushing, Cushing level and refinery are optional.
+  actuals plus `api_crude_mb` are mandatory; the Cushing change is mandatory too (without it the Regime 2 check cannot run); Cushing level and refinery are optional. A zero sigma (identical weeks) stops the run.
   After writing, the engine appends the week to the surprise history (idempotent).
 - **Live finding (2026-09-30):** the history's 12-08-2026 week has a +19.9 mb TLS. With the plain
   std dev sigma was ~8.3 mb; the default MAD gives ~5.8 on the 8 prior weeks, so a trade needs

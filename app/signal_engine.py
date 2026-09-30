@@ -64,6 +64,10 @@ ALWAYS_CHECK = [
     "Stop: 1.5 x 1-min ATR or outside VWAP +/-1.5 sigma, whichever is wider (min $0.18-$0.35); "
     "exit the OPTION when its own premium hits the delta-adjusted stop.",
     "Scale out 50% on the first clean thrust, stop to break-even on the rest.",
+    "Check the option's bid/ask BEFORE the print. If the spread eats a large share of the expected move, "
+    "skip - a wide spread on a deep-ITM strike is a cost paid on entry and again on exit.",
+    "The lot table assumes the option loses delta x the futures stop. It ignores the IV crush after the "
+    "print (vega): size below the table until you have measured real fills.",
 ]
 REGIME_CHECK = {
     1: ["Regime 1: enter on a limit retest of the broken pre-release boundary (P_high long / P_low short), "
@@ -118,7 +122,8 @@ def _num(data, key):
 
 MANDATORY = (("crude_consensus_mb", CONSENSUS_FILE), ("gasoline_consensus_mb", CONSENSUS_FILE),
              ("distillate_consensus_mb", CONSENSUS_FILE), ("crude_change_mb", EIA_ACTUALS_FILE),
-             ("gasoline_change_mb", EIA_ACTUALS_FILE), ("distillate_change_mb", EIA_ACTUALS_FILE),
+             ("cushing_change_mb", EIA_ACTUALS_FILE), ("gasoline_change_mb", EIA_ACTUALS_FILE),
+             ("distillate_change_mb", EIA_ACTUALS_FILE),
              ("api_crude_mb", API_REPORT_FILE))
 
 

@@ -205,21 +205,21 @@ def test_release_date_cross_validation(tmp_path, which, content):
 
 @pytest.mark.parametrize("which,field", [
     ("consensus", "gasoline_consensus_mb"), ("consensus", "distillate_consensus_mb"),
-    ("eia", "crude_change_mb"), ("eia", "gasoline_change_mb"), ("eia", "distillate_change_mb"),
+    ("eia", "crude_change_mb"), ("eia", "cushing_change_mb"), ("eia", "gasoline_change_mb"),
+    ("eia", "distillate_change_mb"),
     ("api", "api_crude_mb"),
 ])
-def test_all_three_liquids_and_the_api_crude_are_mandatory(tmp_path, which, field):
+def test_all_three_liquids_cushing_and_the_api_crude_are_mandatory(tmp_path, which, field):
     base = {"consensus": CONSENSUS, "eia": EIA, "api": API}[which]
     with pytest.raises(InputError, match=field) as err:
         load_inputs(write(tmp_path, **{which: {**base, field: None}}), TODAY)
     assert err.value.title == "Mandatory field missing"
 
 
-def test_cushing_and_refinery_are_optional(tmp_path):
-    bare = {k: v for k, v in EIA.items() if k not in ("cushing_change_mb", "cushing_level_mb", "refinery_util_change_pct")}
+def test_cushing_level_and_refinery_are_optional(tmp_path):
+    bare = {k: v for k, v in EIA.items() if k not in ("cushing_level_mb", "refinery_util_change_pct")}
     inputs = load_inputs(write(tmp_path, eia=bare), TODAY)
-    assert inputs["cushing_change_mb"] is None and inputs["cushing_level_mb"] is None
-    assert inputs["refinery_util_change_pct"] is None
+    assert inputs["cushing_level_mb"] is None and inputs["refinery_util_change_pct"] is None
 
 
 def test_load_market_requires_atr_and_ovx_and_fresh_data(tmp_path):

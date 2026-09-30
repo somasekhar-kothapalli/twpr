@@ -58,6 +58,12 @@ def test_zero_mad_falls_back_to_std_instead_of_dividing_by_zero():
     assert model.sigma_forecast(history) == pytest.approx(statistics.stdev([1, 1, 1, 1, 1, 1, 1, 9]))
 
 
+def test_identical_weeks_refuse_a_zero_sigma_instead_of_dividing_by_it():
+    for method in ("mad", "std"):
+        with pytest.raises(ValueError, match="sigma_forecast is 0"):
+            model.sigma_forecast(weekly(*[2.0] * 8), method=method)
+
+
 def test_unknown_sigma_method_is_refused():
     with pytest.raises(ValueError, match="sigma method"):
         model.sigma_forecast(weekly(*range(8)), method="mean")

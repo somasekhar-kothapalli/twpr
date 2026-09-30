@@ -62,7 +62,10 @@ def sigma_forecast(history, weeks=SIGMA_WEEKS, min_weeks=SIGMA_MIN_WEEKS, method
         mad = MAD_TO_SIGMA * statistics.median(abs(v - median) for v in values)
         if mad > 0:
             return mad
-    return statistics.stdev(values)
+    spread = statistics.stdev(values)
+    if spread <= 0:
+        raise ValueError("sigma_forecast is 0: the last weeks' TLS values are identical, so Z is undefined")
+    return spread
 
 
 def z_score(tls_value, sigma):
