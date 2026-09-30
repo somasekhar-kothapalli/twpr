@@ -58,6 +58,8 @@ python -m app.eia_actuals                           # today's EIA report, polls 
 python -m app.eia_actuals --once                    # single attempt
 python -m app.eia_actuals --date 23-09-2026 --once  # replay a specific release
 
+python -m app.market_data                          # yfinance inputs -> data/market.json
+
 python -m app.signal_engine                        # data/*.json -> data/signal.json
 python -m app.signal_engine --allow-stale          # replay input files older than 2 days
 
@@ -213,6 +215,21 @@ Released Wed 10:30 ET (20:00 IST); polls every 60 s for up to 90 min unless `--o
   DD-MM-YYYY dates), `setup_logging` silences httpx (the Telegram token is in its URL).
 - `common.poll(attempt, once, interval_s, timeout_s, log)` retries on `RuntimeError`
   ("not there yet") and lets every other exception propagate; both polling scripts use it.
+
+### `app/market_data.py` — market inputs for the runbook model
+
+Spec of record is now the runbook model (`docs/WPSR_WEDNESDAY_RUNBOOK.md` + the MCX options
+adaptation): TLS / Z-score, ITM delta 0.65 (0.80-0.85 when OVX > 35), 1% risk. The
+grade/ATM/2% engine below predates that decision and is being replaced step by step.
+
+Writes `data/market.json` (`MARKET_FILE`) from yfinance: `atr_20` (simple mean of the last 20
+true ranges of daily WTI bars; today's still-forming bar is excluded), `ovx`, `cl1_cl2`,
+`crack_321` (products converted gallons -> barrels, x42), `brent_wti`, `dxy`, plus `wti`,
+`as_of`, `fetched_at`. `atr_20` and `ovx` are required (fail loudly: Telegram alert, exit 1,
+nothing written); the scorecard values become `null` if unreadable. CL2 has no continuous
+ticker: `contract_symbols` builds `CL<month><yy>.NYM` and `front_second` picks the contract
+trading at CL=F's price (within 0.25) and the one after it; no match -> `cl1_cl2: null`, never
+a guess. Expired contracts log a yfinance 404 (harmless).
 
 ### `app/signal_engine.py` — the signal
 

@@ -17,6 +17,7 @@ ROOT = DATA_DIR.parent
 CONSENSUS_FILE = DATA_DIR / "consensus.json"      # consensus_fetcher -> signal_engine
 API_REPORT_FILE = DATA_DIR / "api_report.json"    # api_monitor       -> signal_engine
 EIA_ACTUALS_FILE = DATA_DIR / "eia_actuals.json"  # eia_actuals       -> signal_engine
+MARKET_FILE = DATA_DIR / "market.json"            # market_data       -> signal_engine
 SIGNAL_FILE = DATA_DIR / "signal.json"            # signal_engine
 DATE_FORMAT = "%d-%m-%Y"
 TIMESTAMP_FORMAT = "%d-%m-%Y %H:%M"

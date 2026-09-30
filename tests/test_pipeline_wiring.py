@@ -10,7 +10,7 @@ from app import api_monitor, consensus_fetcher, eia_actuals, signal_engine
 from app.utils import common, telegram
 
 APP = pathlib.Path(__file__).resolve().parent.parent / "app"
-DATA_FILES = ("consensus.json", "api_report.json", "eia_actuals.json", "signal.json")
+DATA_FILES = ("consensus.json", "api_report.json", "eia_actuals.json", "market.json", "signal.json")
 
 
 # ----------------------------------------------------------- one home for file names
@@ -47,7 +47,8 @@ def test_each_producer_writes_the_file_the_engine_reads():
 
 
 def test_data_files_live_in_the_repo_data_dir():
-    for path in (common.CONSENSUS_FILE, common.API_REPORT_FILE, common.EIA_ACTUALS_FILE, common.SIGNAL_FILE):
+    for path in (common.CONSENSUS_FILE, common.API_REPORT_FILE, common.EIA_ACTUALS_FILE, common.MARKET_FILE,
+                 common.SIGNAL_FILE):
         assert path.parent == common.DATA_DIR and path.name in DATA_FILES
 
 
