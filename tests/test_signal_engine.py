@@ -69,7 +69,7 @@ def test_expected_move_is_negative_for_a_build_and_flags_the_sanity_band():
 def test_small_surprise_relative_to_sigma_stands_down_with_no_trade_detail():
     s = signal(sigma=5.0)
     assert s["signal"] == {"action": "stand_down", "regime": None, "direction": "neutral",
-                           "option_type": "NONE", "strike_type": "NONE"}
+                           "option_type": "NONE", "strike_type": "NONE", "reason": "z_below_gate"}
     assert s["expected_move"] is s["option"] is s["sizing"] is None and s["checklist"] == []
     assert (s["analysis"], s["model_used"]) == ("", "rule_based")      # no narrative is asked for on a stand-down
 
@@ -573,10 +573,24 @@ def test_main_unexpected_error_alerts_telegram(monkeypatch, tmp_path):
     assert alerts and "ZeroDivisionError" in alerts[0][1]
 
 
+def test_api_aligns_compares_the_api_surprise_with_the_eia_crude_surprise():
+    base = {**INPUTS, "crude_consensus_mb": -3.0, "api_crude_mb": -1.0, "crude_change_mb": 2.0}   # API +2.0 vs consensus, EIA +5.0
+    assert build_signal(base, MARKET, SIGMA, 84.0, "fallback", analyse=stub())["calculations"]["api_aligns"] is True
+    opposed = {**base, "api_crude_mb": -5.0}                                                       # API -2.0 vs consensus
+    assert build_signal(opposed, MARKET, SIGMA, 84.0, "fallback", analyse=stub())["calculations"]["api_aligns"] is False
+
+
+def test_a_non_numeric_value_is_an_input_error_naming_the_field():
+    with pytest.raises(InputError, match="crude_change_mb='N/A'"):
+        se._num({"crude_change_mb": "N/A"}, "crude_change_mb")
+    assert se._num({}, "x") is None and se._num({"x": "1.23456"}, "x") == 1.235
+
+
 def test_a_trade_signal_on_a_day_the_evening_session_is_closed_says_so_first():
     s = build_signal({**INPUTS, "release_date": "26-01-2026", "crude_change_mb": 12.0},
                      {**MARKET, "fetched_at": "26-01-2026 18:00"}, SIGMA, 84.0, "fallback", analyse=stub())
-    assert s["signal"]["action"] == "trade"
+    assert s["signal"]["action"] == "stand_down" and s["signal"]["reason"] == "mcx_evening_closed: Republic Day"
+    assert s["signal"]["regime"] == 1                                     # the decision is kept for the record
     assert s["schedule"]["mcx_evening_open"] is False and s["schedule"]["mcx_closed_reason"] == "Republic Day"
     assert "EVENING SESSION IS CLOSED" in s["checklist"][0]
     assert signal()["schedule"]["mcx_evening_open"] is True             # an ordinary Wednesday

@@ -120,7 +120,12 @@ def _load_dated(path, label):
 
 def _num(data, key):
     value = data.get(key)
-    return None if value is None else round(float(value), 3)
+    if value is None:
+        return None
+    try:
+        return round(float(value), 3)
+    except (TypeError, ValueError):
+        raise InputError("Invalid value", f"{key}={value!r} is not a number") from None
 
 
 MANDATORY = (("crude_consensus_mb", CONSENSUS_FILE), ("gasoline_consensus_mb", CONSENSUS_FILE),
@@ -411,11 +416,12 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
         "cushing_multiplier": round(multiplier, 3),
         "regime3_setup": setup3, "overnight_rally_usd": rally,
         "cushing_level_known": inputs["cushing_level_mb"] is not None,
-        "api_surprise_mb": api_surprise, "api_aligns": (tls > 0) == (inputs["api_crude_mb"] > 0),
+        "api_surprise_mb": api_surprise, "api_aligns": (api_surprise > 0) == (surprises["crude"] > 0),   # API vs EIA crude surprise (both against consensus)
         "beta_vol": round(beta, 3),
     }
     signal = {"action": "trade" if regime else "stand_down", "regime": regime, "direction": direction,
-              "option_type": "NONE", "strike_type": "NONE"}
+              "option_type": "NONE", "strike_type": "NONE",
+              "reason": None if regime else "z_below_gate"}   # why it is a stand-down (None for a trade)
     move = option = sizing = None
     checklist = []
     if regime:
@@ -438,7 +444,7 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
                     "anchor_low_usd": anchor[0], "anchor_high_usd": anchor[1],
                     "anchor_low_inr": int(round(anchor[0] * usd_inr)), "anchor_high_inr": int(round(anchor[1] * usd_inr)),
                     "band": options.band_context(anchor[1] * usd_inr, market["wti"] * usd_inr) if market.get("wti") else None}
-        checklist = REGIME_CHECK[regime] + ([TIME_SPREAD_CHECK] if regime == 1 and direction == "bullish" else [])             + ALWAYS_CHECK
+        checklist = REGIME_CHECK[regime] + ([TIME_SPREAD_CHECK] if regime == 1 and direction == "bullish" else []) + ALWAYS_CHECK
         if option["expiry_source"] != "mcx_calendar":
             checklist.insert(0, f"The expiry date {option['expiry_date']} is a GUESS (that month is not in the MCX "
                              "calendar loaded: the 19th, or the business day before): check it on your chain.")
@@ -452,6 +458,8 @@ def build_signal(inputs, market, sigma, usd_inr, usd_inr_source, lots=None,
     if regime and not evening_open:
         checklist.insert(0, f"MCX's EVENING SESSION IS CLOSED on {inputs['release_date']} ({closed_reason}): "
                             "this signal cannot be traded today.")
+        # Anything that reads only `action` must not act on it: regime/direction stay for the record.
+        signal["action"], signal["reason"] = "stand_down", f"mcx_evening_closed: {closed_reason}"
     fx = {"usd_inr": round(usd_inr, 2), "usd_inr_source": usd_inr_source}
 
     if regime:

@@ -333,7 +333,7 @@ the newest and wins wherever it differs from the 2024 leaflet. Source of truth f
 Reads `consensus.json`, `api_report.json`, `eia_actuals.json`, `market.json` and
 `surprise_history.json`; writes `data/signal.json`: `inputs`, `calculations`, `signal`
 (`action` trade/stand_down, `regime` 1/2/3/null, `direction`, `option_type`, `strike_type`
-ITM), `expected_move`, `option`, `sizing`, `scorecard`, `schedule`, `checklist`, `analysis`,
+ITM, `reason`: `z_below_gate` on a stand-down, `mcx_evening_closed: <holiday>` when a regime fired but MCX's evening session is closed - then `action` is `stand_down` (so nothing reading only the action acts on it) and regime/direction are kept for the record), `expected_move`, `option`, `sizing`, `scorecard`, `schedule`, `checklist`, `analysis`,
 `model_used`. No scraping. The maths is pure and lives in `model.py` (TLS, sigma, Z,
 Cushing multiplier and contradiction, beta_vol, expected move, `classify`) and `options.py`
 (delta, expiry gate, lots, DST-aware IST clock); the engine loads, validates and assembles.

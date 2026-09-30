@@ -51,12 +51,14 @@ def format_signal(signal, replay_days=None):
     surprises = (f"crude {calc['crude_surprise_mb']:+.3f} | gasoline {calc['gasoline_surprise_mb']:+.3f} | "
                  f"distillate {calc['distillate_surprise_mb']:+.3f}")
     if trade["action"] == "stand_down":
+        closed = (trade.get("reason") or "").startswith("mcx_evening_closed")
+        why = ("the signal (Regime %s %s) cannot be traded: MCX's evening session is closed (%s)."
+               % (trade["regime"], trade["direction"], trade["reason"].split(": ", 1)[-1])) if closed             else "inside the 1.25 sigma noise band."
         lines += [
             f"{NEUTRAL} TWPR - STAND DOWN",
             f"Release {signal['release_date']}",
             "",
-            f"TLS {calc['tls_mb']:+.3f} mb, Z {calc['z_tls']:+.2f} (sigma {calc['sigma_forecast_mb']:.3f}): "
-            "inside the 1.25 sigma noise band.",
+            f"TLS {calc['tls_mb']:+.3f} mb, Z {calc['z_tls']:+.2f} (sigma {calc['sigma_forecast_mb']:.3f}): " + why,
             f"Surprises: {surprises}",
             "No position this week.",
         ]
