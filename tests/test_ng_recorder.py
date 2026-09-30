@@ -70,6 +70,15 @@ def test_five_minute_path_leaves_one_and_two_minute_empty():
     assert p["high_1h"] > p["low_1h"]
 
 
+def test_a_holiday_release_at_noon_is_timed_from_noon():
+    assert rec.print_time("24-09-2026").hour == 10 and rec.print_time("25-11-2026").hour == 12
+    assert rec.print_time("13-11-2026").hour == 10 and rec.print_time("13-11-2026").minute == 30   # Veterans Day: Friday, same time
+    t0 = datetime(2026, 11, 25, 12, 0, tzinfo=NEW_YORK)
+    noon = [(t0 + timedelta(minutes=m), 3.0 + 0.001 * m, 3.01, 2.99, 3.0 + 0.001 * m) for m in range(-10, 70, 5)]
+    p = rec.path_from_bars(noon, "25-11-2026", 5)
+    assert p["pre_print"] is not None and p["prices"]["60"] is not None
+
+
 def test_no_pre_print_bar_gives_no_path():
     late = [b for b in bars(5) if b[0] >= datetime(2026, 9, 24, 10, 30, tzinfo=NEW_YORK)]
     assert rec.path_from_bars(late, "24-09-2026", 5) is None

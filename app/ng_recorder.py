@@ -31,6 +31,10 @@ logger = logging.getLogger("twpr.ng_recorder")
 
 SITES = ("tradingeconomics", "investing")
 OFFSETS_MIN = (0, 1, 2, 5, 10, 15, 30, 60)   # minutes after the print
+# EIA's holiday schedule (https://ir.eia.gov/ngs/schedule.html) moves some reports off Thursday 10:30 ET. The 2026
+# exceptions: Fri 13 Nov (Veterans Day) at 10:30, which is the default time, and Wed 25 Nov (Thanksgiving) at 12:00.
+# Add the 2027 entries when EIA publishes them; a release not listed here is assumed to print at 10:30 ET.
+RELEASE_TIME_EXCEPTIONS = {"25-11-2026": (12, 0)}
 MAX_1M_DAYS = 6      # Yahoo keeps 1-minute bars for about a week
 MAX_5M_DAYS = 55     # and 5-minute bars for about 60 days
 
@@ -53,7 +57,7 @@ def merge(old, new):
 
 def print_time(release_date):
     day = datetime.strptime(release_date, DATE_FORMAT)
-    return datetime(day.year, day.month, day.day, *PRINT_ET, tzinfo=NEW_YORK)
+    return datetime(day.year, day.month, day.day, *RELEASE_TIME_EXCEPTIONS.get(release_date, PRINT_ET), tzinfo=NEW_YORK)
 
 
 def path_from_bars(bars, release_date, interval_min, offsets=OFFSETS_MIN):

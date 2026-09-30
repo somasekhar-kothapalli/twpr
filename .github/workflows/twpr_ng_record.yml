@@ -2,11 +2,13 @@ name: TWPR Natural Gas Record
 
 # Passive recorder for the EIA natural gas storage report (Thursday 10:30 New York). Records only: no signal,
 # no trade. 17:00 UTC is 22:30 IST: an hour and a half after the print in winter (15:30 UTC) and two and a half in
-# summer (14:30 UTC), so the 60-minute price path is complete in both. In a week where a US holiday moves the
-# report to Wednesday this still finds it: it records the latest released report.
+# summer (14:30 UTC), so the 60-minute price path is complete in both. EIA moves some reports (2026: Fri 13 Nov,
+# Wed 25 Nov at 12:00 ET), so it also runs Wednesday and Friday: each run records the latest released report and
+# is idempotent, and a run that finds nothing new changes nothing. On Wed 25 Nov the noon print is at 17:00 UTC,
+# so that week is captured by the Thursday 26 Nov run (Yahoo still has the 1-minute bars).
 on:
   schedule:
-    - cron: "0 17 * * 4"
+    - cron: "0 17 * * 3-5"
   workflow_dispatch:
 
 permissions:

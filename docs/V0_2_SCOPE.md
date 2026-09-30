@@ -27,6 +27,7 @@ Look at `python -m app.ng_recorder --show` after about 20-26 recorded weeks (aro
 ## Watch-outs
 
 - The workflow runs only from `main`; nothing is recorded on Thursdays until this branch is merged.
+- EIA moves some reports (2026: Fri 13 Nov 10:30 ET, Wed 25 Nov 12:00 ET); the recorder knows the time exceptions and the workflow runs Wednesday to Friday. Check `https://ir.eia.gov/ngs/schedule.html` for 2027.
 - Yahoo keeps 5-minute bars about 60 days and 1-minute bars a week, so a missed Thursday cannot be recovered later.
 - Consensus panels differ (24-09: 53 on tradingeconomics, 50 on investing.com), so the surprise depends on the source. Both are recorded.
 - Crude v0.1 validation (one live Wednesday, three forward Wednesdays at minimum size) remains the priority.

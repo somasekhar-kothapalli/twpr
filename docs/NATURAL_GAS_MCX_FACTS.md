@@ -183,3 +183,21 @@ Gemini reviewed the plan and answered the twelve questions. Treat every figure b
 - `.github/workflows/twpr_ng_record.yml` runs it Thursdays 17:00 UTC (22:30 IST, so the hour of price bars is complete in summer and winter) and commits the file. Like the crude workflows it runs only from `main`, and it needs the same `production` environment secrets (Telegram only).
 - It alerts Telegram only on failure. `to_mb_suffixed` now reads `Bcf` and `B` suffixes and `sources.py` has the `ng_storage` slugs.
 - The recorder needs an unattended Thursday to have run a few times before anyone trusts the record. It cannot capture what only the MCX chain shows (spreads, premiums); that stays a manual note until a chain feed exists.
+
+## 8. Gemini round two (2026-09-30) and EIA's real release schedule
+
+`docs/GEMINI_NG_PROMPT.md` asked for sources or "I don't know". Answers were more honest this time.
+
+| Question | Gemini | Assessment |
+|---|---|---|
+| MCX option spreads | "I don't know"; estimate Rs 0.50-1.00 ATM, Rs 3-5 deep-ITM (Rs 8+ at the print) | Unsourced estimate, same as before. Still needs a manual log of the real chain |
+| Retracement | "I don't know" | Open. The recorder's 15/30/60-minute prices will answer it |
+| Weather feeds | NOAA CPC 6-10 and 8-14 day products; pipeline bulletin boards for feedgas | The CPC pages exist (`https://www.cpc.ncep.noaa.gov/products/predictions/814day/`); the `ftp://` directory it quoted returned 404 over https, and the file formats are unverified. Parsing it into gas-weighted HDD/CDD is real work. Feedgas needs per-pipeline scrapers. Weather stays manual |
+| Consensus history | No free archive exists | Matches what we found (10 weeks) |
+| Context variable | EIA's STEO projects end-of-season storage; no agreed glut/deficit threshold | Plausible and worth checking as a replacement for the -5%/+10% rule. Unverified here |
+| Report dates | "Mon-Wed holiday -> Friday; Thursday holiday -> Wednesday 12:00" | **Wrong rule, right URL.** EIA lists dated exceptions instead (below) |
+| No-edge reason | Latency and adverse selection: your fill only happens once the move has mean-reverted | Same as the first round. Its test (log the spread when the data arrives, check whether a limit at the ask would have survived, over about 20 prints) is a good manual protocol |
+
+**EIA holiday schedule** (`https://ir.eia.gov/ngs/schedule.html`, read 2026-09-30): the standard release is Thursday 10:30 ET. The listed exceptions are New Year's Day 2025 (Fri 3 Jan, 10:30), the National Day of Mourning (Wed 8 Jan 2025, 12:00), Juneteenth 2025 (Wed 18 Jun, 12:00), Veterans Day 2025 (Fri 14 Nov, 10:30), Thanksgiving 2025 (Wed 26 Nov, 12:00), Christmas 2025 (Mon 29 Dec, **12:00**), New Year's 2025 (Wed 31 Dec, 12:00), and for 2026 **Fri 13 Nov at 10:30 (Veterans Day)** and **Wed 25 Nov at 12:00 (Thanksgiving)**. Two consequences:
+- Some releases print at **12:00 ET, not 10:30**. That is 21:30 IST in summer or 22:30 IST in winter, only an hour before the MCX close in winter, so a 12:00 release is barely tradable in the MCX evening.
+- The recorder assumed 10:30 ET. It now has `RELEASE_TIME_EXCEPTIONS` (25-11-2026 at 12:00) and the workflow runs Wednesday to Friday so Friday and Wednesday releases are caught. The 2027 exceptions are not published yet.
