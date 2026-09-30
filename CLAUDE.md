@@ -77,6 +77,7 @@ python -m app.run all --replay 23-09-2026          # a past release end to end (
 python -m app.pre_brief --print                    # the pre-print brief, shown instead of sent
 python -m app.watch --dry-run                      # the reminder times for today's signal
 python -m app.journal fill ...                     # log a fill by hand;  path / show: post-print prices and statistics
+python -m app.ng_recorder [--date D | --backfill | --show]   # natural gas storage record (v0.2, record only)
 
 python -m pytest tests -q                          # offline suite (default)
 python -m pytest tests -m network -k tradingeconomics   # live URL health check
@@ -444,6 +445,18 @@ week."; missing optional data reads `N/A`/`unknown`, not a crash. Runs after `si
   `REPLAY - data is N days old, NOT a live signal`. Missing/corrupt file -> error alert too.
 - Windows consoles are cp1252: never `print()` this text (emoji raise `UnicodeEncodeError`);
   the script only logs, and `setup_logging` forces UTF-8.
+
+### `app/ng_recorder.py`, `app/utils/ng_storage.py` — natural gas storage record (v0.2, record only)
+
+Writes `data/ng_record.json` (`NG_RECORD_FILE`), one record per release date, merged so a later poorer run never
+erases data: actual, both consensus panels (they differ), EIA's storage table from the public
+`https://ir.eia.gov/ngs/wngsr.csv` (needs `follow_redirects`; total stocks, net change vs implied flow with a
+`reclassified` flag, the 5-year average and the % against it; the file holds only the latest week) and NG=F's price
+path after the print (1-minute bars under a week old, else 5-minute; none after ~55 days). No signal, no trade,
+alert only on failure. **Why record only:** an 8-print check found no support for the assumed 0.003-0.005 USD per Bcf
+(measured about -0.0009 at 5 minutes), so the model waits for a sample; see `docs/V0_2_SCOPE.md` and
+`docs/NATURAL_GAS_MCX_FACTS.md`. Workflow `twpr_ng_record.yml` (Thursday 17:00 UTC). `sources.INDICATORS["ng_storage"]`
+holds the slugs; storage values carry `Bcf` / `B` suffixes that `to_mb_suffixed` now reads (unit Bcf, not mb).
 
 ### `app/run.py`, `app/pre_brief.py`, `app/watch.py`, `app/journal.py` — release day and the record
 

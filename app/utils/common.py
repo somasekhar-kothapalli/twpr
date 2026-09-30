@@ -21,6 +21,7 @@ MARKET_FILE = DATA_DIR / "market.json"            # market_data       -> signal_
 SURPRISE_HISTORY_FILE = DATA_DIR / "surprise_history.json"  # surprise_history -> signal_engine (sigma_forecast)
 SIGNAL_FILE = DATA_DIR / "signal.json"            # signal_engine
 JOURNAL_FILE = DATA_DIR / "journal.json"          # journal (your own fills and the post-print price paths)
+NG_RECORD_FILE = DATA_DIR / "ng_record.json"    # ng_recorder (natural gas storage prints and price paths; v0.2, record only)
 DATE_FORMAT = "%d-%m-%Y"
 TIMESTAMP_FORMAT = "%d-%m-%Y %H:%M"
 

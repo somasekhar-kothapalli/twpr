@@ -143,3 +143,43 @@ Read-only checks against the live sources. No pipeline code changed.
 - Caveats: 8 prints, one season (summer injections), investing.com's consensus panel, a continuous front-month series (27-08 is a contract-roll day).
 
 **Read-out.** The inputs exist and are free (steps 1 and 2 of the plan are feasible: two consensus sources, the EIA level and 5-year average, price bars). The **edge is not demonstrated**: in the only measurable sample the surprise did not predict the first-5-minute direction. Do not build the model (steps 3-8) until a larger sample, or Gemini answers to questions 1, 5 and 6, say otherwise. Cheap next checks: keep logging each Thursday's print and price path (the journal does this for crude) so the sample grows by one a week; the 60-day bar window means the earliest of these 8 drops out in early October.
+
+## 6. Gemini's answers (2026-09-30) and what we did with them
+
+Gemini reviewed the plan and answered the twelve questions. Treat every figure below as an unverified claim: none of it comes from data we hold.
+
+**Not applicable to this system** (the review seems to have assumed a different codebase): a hardcoded expiry on the 19th (we use MCX's dated calendar), automatic order execution (there is none), Regime 3 fired from inventory alone (it needs a measured rally, and natural gas has no Regime 3), Cushing `None` forcing a trade, `omega_distillate` and `beta_vol` (crude parts; nothing built for natural gas).
+
+**Unreliable:**
+- The anchor is inconsistent across two Gemini answers: 0.003-0.005 USD per Bcf earlier, **0.007-0.015** now (0.012-0.015 in winter). Neither matches the 8-print measurement (section 5: about -0.0009 at 5 minutes, wrong sign). The cited paper (Linn and Zhu) is real but concerns volatility around storage reports; it does not establish a per-Bcf slope.
+- Spreads (Rs 2-3 deep-ITM before the print, Rs 5-8 after) and implied-volatility levels (60-75% before, 45-50% after) are unsourced. They are plausible, and they show why the trade may not pay, but nobody here has seen the MCX chain.
+- "By minute 2, 80-90% of the move is done" is consistent with our data (small, undirected 5-minute moves) but not proven either way.
+- Holidays: Gemini says a holiday delays the report to Friday. My understanding is that EIA moves it to Wednesday (Thanksgiving week). Check EIA's schedule; the recorder does not assume a weekday.
+- "Refuse to trade on scraped feeds": the seconds of scraper delay are small next to a manual order placed minutes after the print, and a sub-millisecond feed would not help a manual trader. The underlying worry, that the move is over before a human can act, is real and is what the recorder measures.
+
+**Adopted:**
+- **Implied flow versus net change.** EIA's table carries both. The recorder stores both and flags `reclassified` when they differ by more than 0.5 Bcf. Any future rule aborts on it.
+- **Both consensus panels are kept** (tradingeconomics and investing.com), since they differ (24-09: 53 and 50).
+- **A pre-print spread limit, and an option stop that adds spread and IV crush** are manual checklist items when there is anything to trade (they need chain quotes we do not have).
+- **Seasonal sigma:** a 12-week window mixes seasons and a 52-week window is not obtainable (about 10 weeks of history). Recording a year forward is the only fix.
+- **A sample of at least two years** is the honest bar; nothing can be backfilled to it.
+
+**Not adopted:** mean-centring the Z-score (fair test, but with 8 weeks it adds noise), a fixed 0.01 USD per Bcf scalar (it would replace one unmeasured number with another), the 52-week window, and the USD/INR intraday veto (the onshore rupee market is shut during the hold).
+
+**Decision: record, do not trade.** `app/ng_recorder.py` (section 7) writes each Thursday's print and price path. No model, signal, sizing or alert. Revisit after roughly 20-26 weeks (about March 2027). The full model (steps 3-8 of the plan) is on hold until a measured slope beats round-trip costs.
+
+## 7. The passive recorder (built)
+
+`python -m app.ng_recorder` writes `data/ng_record.json` (`NG_RECORD_FILE`), one record per release date, merged so a later, poorer run never erases data:
+
+| Field | Source |
+|---|---|
+| `actual_bcf`, `previous_bcf`, `actual_agrees` | tradingeconomics, investing.com (the actuals are compared) |
+| `consensus_bcf`, `surprise_bcf` | one entry per site (the panels differ) |
+| `eia` | EIA's storage table: stocks, net change, implied flow, `reclassified`, year-ago, 5-year average and the % against it (kept only if EIA's file is for that release; it only ever holds the latest week) |
+| `price` | NG=F after the print: the pre-print close, the price at 0/1/2/5/10/15/30/60 minutes, moves from the pre-print price, first-hour high and low. 1-minute bars if the release is under a week old, else 5-minute (no 1- and 2-minute prices), and none after about 55 days |
+
+- `--date DD-MM-YYYY` records a specific release; `--backfill` records every release investing.com still lists (the 8 prints from 6 Aug to 24 Sep are in `data/ng_record.json`, though `eia` exists only for the latest); `--show` prints the surprises against the moves and the fitted slope once there are 3 or more.
+- `.github/workflows/twpr_ng_record.yml` runs it Thursdays 17:00 UTC (22:30 IST, so the hour of price bars is complete in summer and winter) and commits the file. Like the crude workflows it runs only from `main`, and it needs the same `production` environment secrets (Telegram only).
+- It alerts Telegram only on failure. `to_mb_suffixed` now reads `Bcf` and `B` suffixes and `sources.py` has the `ng_storage` slugs.
+- The recorder needs an unattended Thursday to have run a few times before anyone trusts the record. It cannot capture what only the MCX chain shows (spreads, premiums); that stays a manual note until a chain feed exists.

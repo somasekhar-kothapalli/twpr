@@ -39,13 +39,17 @@ def gmt_to_ist(time_str):
 
 
 def to_mb_suffixed(text):
-    """'-1.6M' / '250K' -> million barrels; None if blank or unparseable.
+    """'-1.6M' / '250K' -> million barrels ('53Bcf' / '53.00B' -> 53.0 Bcf, unit unchanged); None if blank or unparseable.
     A trailing '%' (refinery utilisation) is stripped and the number kept as-is."""
     text = text.strip().replace(",", "").rstrip("%")
     if not text:
         return None
     mult = 1.0
-    if text.endswith("M"):
+    if text.endswith("Bcf"):      # natural gas storage: '53Bcf' (tradingeconomics)
+        text = text[:-3]
+    elif text.endswith("B"):      # '53.00B' (investing.com); billion cubic feet, kept as-is
+        text = text[:-1]
+    elif text.endswith("M"):
         text = text[:-1]
     elif text.endswith("K"):
         text = text[:-1]

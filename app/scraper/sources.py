@@ -37,6 +37,11 @@ INDICATORS = {
         "tradingeconomics": "united-states/api-crude-oil-stock-change",
         "investing": "api-weekly-crude-stock-656",
     },
+    # Natural gas storage (Bcf, not million barrels): weekly change, Thursdays. Values carry a Bcf / B suffix.
+    "ng_storage": {
+        "tradingeconomics": "united-states/natural-gas-stocks-change",
+        "investing": "natural-gas-storage-386",
+    },
     # The API's cushing/gasoline/distillate are deliberately NOT here (paywalled at the source; the
     # tradingeconomics copies lag; investing.com's events for them are dead). Do not re-add.
 }

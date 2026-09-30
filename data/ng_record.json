@@ -1,0 +1,336 @@
+{
+  "records": {
+    "24-09-2026": {
+      "release_date": "24-09-2026",
+      "recorded_at": "30-09-2026 16:07",
+      "actual_bcf": 53.0,
+      "previous_bcf": 44.0,
+      "actual_agrees": null,
+      "consensus_bcf": {
+        "investing.com": 50.0
+      },
+      "surprise_bcf": {
+        "investing.com": 3.0
+      },
+      "eia": {
+        "release_date": "24-09-2026",
+        "week_ending": "18-09-2026",
+        "total_bcf": 3351.0,
+        "prior_total_bcf": 3298.0,
+        "net_change_bcf": 53.0,
+        "implied_flow_bcf": 53.0,
+        "year_ago_bcf": 3497.0,
+        "pct_vs_year_ago": -4.2,
+        "five_year_avg_bcf": 3256.0,
+        "pct_vs_five_year_avg": 2.9,
+        "reclassified": false
+      },
+      "price": {
+        "interval_min": 1,
+        "pre_print": 3.174,
+        "prices": {
+          "0": 3.174,
+          "1": 3.16,
+          "2": 3.162,
+          "5": 3.168,
+          "10": 3.156,
+          "15": 3.199,
+          "30": 3.264,
+          "60": 3.321
+        },
+        "moves": {
+          "0": 0.0,
+          "1": -0.014,
+          "2": -0.012,
+          "5": -0.006,
+          "10": -0.018,
+          "15": 0.025,
+          "30": 0.09,
+          "60": 0.147
+        },
+        "high_1h": 3.324,
+        "low_1h": 3.14
+      }
+    },
+    "17-09-2026": {
+      "release_date": "17-09-2026",
+      "recorded_at": "30-09-2026 16:07",
+      "actual_bcf": 44.0,
+      "previous_bcf": 40.0,
+      "actual_agrees": null,
+      "consensus_bcf": {
+        "investing.com": 49.0
+      },
+      "surprise_bcf": {
+        "investing.com": -5.0
+      },
+      "eia": null,
+      "price": {
+        "interval_min": 5,
+        "pre_print": 2.939,
+        "prices": {
+          "0": 2.938,
+          "1": null,
+          "2": null,
+          "5": 2.922,
+          "10": 2.919,
+          "15": 2.916,
+          "30": 2.921,
+          "60": 2.917
+        },
+        "moves": {
+          "0": -0.001,
+          "1": null,
+          "2": null,
+          "5": -0.017,
+          "10": -0.02,
+          "15": -0.023,
+          "30": -0.018,
+          "60": -0.022
+        },
+        "high_1h": 2.959,
+        "low_1h": 2.911
+      }
+    },
+    "10-09-2026": {
+      "release_date": "10-09-2026",
+      "recorded_at": "30-09-2026 16:07",
+      "actual_bcf": 40.0,
+      "previous_bcf": 30.0,
+      "actual_agrees": null,
+      "consensus_bcf": {
+        "investing.com": 35.0
+      },
+      "surprise_bcf": {
+        "investing.com": 5.0
+      },
+      "eia": null,
+      "price": {
+        "interval_min": 5,
+        "pre_print": 2.77,
+        "prices": {
+          "0": 2.77,
+          "1": null,
+          "2": null,
+          "5": 2.773,
+          "10": 2.777,
+          "15": 2.787,
+          "30": 2.778,
+          "60": 2.79
+        },
+        "moves": {
+          "0": 0.0,
+          "1": null,
+          "2": null,
+          "5": 0.003,
+          "10": 0.007,
+          "15": 0.017,
+          "30": 0.008,
+          "60": 0.02
+        },
+        "high_1h": 2.792,
+        "low_1h": 2.753
+      }
+    },
+    "03-09-2026": {
+      "release_date": "03-09-2026",
+      "recorded_at": "30-09-2026 16:07",
+      "actual_bcf": 30.0,
+      "previous_bcf": 15.0,
+      "actual_agrees": null,
+      "consensus_bcf": {
+        "investing.com": 30.0
+      },
+      "surprise_bcf": {
+        "investing.com": 0.0
+      },
+      "eia": null,
+      "price": {
+        "interval_min": 5,
+        "pre_print": 2.99,
+        "prices": {
+          "0": 2.988,
+          "1": null,
+          "2": null,
+          "5": 2.987,
+          "10": 2.958,
+          "15": 2.957,
+          "30": 2.923,
+          "60": 2.895
+        },
+        "moves": {
+          "0": -0.002,
+          "1": null,
+          "2": null,
+          "5": -0.003,
+          "10": -0.032,
+          "15": -0.033,
+          "30": -0.067,
+          "60": -0.095
+        },
+        "high_1h": 3.005,
+        "low_1h": 2.891
+      }
+    },
+    "27-08-2026": {
+      "release_date": "27-08-2026",
+      "recorded_at": "30-09-2026 16:07",
+      "actual_bcf": 15.0,
+      "previous_bcf": 16.0,
+      "actual_agrees": null,
+      "consensus_bcf": {
+        "investing.com": 19.0
+      },
+      "surprise_bcf": {
+        "investing.com": -4.0
+      },
+      "eia": null,
+      "price": {
+        "interval_min": 5,
+        "pre_print": 2.977,
+        "prices": {
+          "0": 2.977,
+          "1": null,
+          "2": null,
+          "5": 2.94,
+          "10": 2.948,
+          "15": 2.937,
+          "30": 2.933,
+          "60": 2.926
+        },
+        "moves": {
+          "0": 0.0,
+          "1": null,
+          "2": null,
+          "5": -0.037,
+          "10": -0.029,
+          "15": -0.04,
+          "30": -0.044,
+          "60": -0.051
+        },
+        "high_1h": 2.99,
+        "low_1h": 2.923
+      }
+    },
+    "20-08-2026": {
+      "release_date": "20-08-2026",
+      "recorded_at": "30-09-2026 16:07",
+      "actual_bcf": 16.0,
+      "previous_bcf": 36.0,
+      "actual_agrees": null,
+      "consensus_bcf": {
+        "investing.com": 15.0
+      },
+      "surprise_bcf": {
+        "investing.com": 1.0
+      },
+      "eia": null,
+      "price": {
+        "interval_min": 5,
+        "pre_print": 2.752,
+        "prices": {
+          "0": 2.751,
+          "1": null,
+          "2": null,
+          "5": 2.744,
+          "10": 2.733,
+          "15": 2.727,
+          "30": 2.726,
+          "60": 2.728
+        },
+        "moves": {
+          "0": -0.001,
+          "1": null,
+          "2": null,
+          "5": -0.008,
+          "10": -0.019,
+          "15": -0.025,
+          "30": -0.026,
+          "60": -0.024
+        },
+        "high_1h": 2.761,
+        "low_1h": 2.721
+      }
+    },
+    "13-08-2026": {
+      "release_date": "13-08-2026",
+      "recorded_at": "30-09-2026 16:07",
+      "actual_bcf": 36.0,
+      "previous_bcf": 33.0,
+      "actual_agrees": null,
+      "consensus_bcf": {
+        "investing.com": 31.0
+      },
+      "surprise_bcf": {
+        "investing.com": 5.0
+      },
+      "eia": null,
+      "price": {
+        "interval_min": 5,
+        "pre_print": 2.745,
+        "prices": {
+          "0": 2.748,
+          "1": null,
+          "2": null,
+          "5": 2.728,
+          "10": 2.735,
+          "15": 2.742,
+          "30": 2.741,
+          "60": 2.746
+        },
+        "moves": {
+          "0": 0.003,
+          "1": null,
+          "2": null,
+          "5": -0.017,
+          "10": -0.01,
+          "15": -0.003,
+          "30": -0.004,
+          "60": 0.001
+        },
+        "high_1h": 2.761,
+        "low_1h": 2.712
+      }
+    },
+    "06-08-2026": {
+      "release_date": "06-08-2026",
+      "recorded_at": "30-09-2026 16:07",
+      "actual_bcf": 33.0,
+      "previous_bcf": 28.0,
+      "actual_agrees": null,
+      "consensus_bcf": {
+        "investing.com": 30.0
+      },
+      "surprise_bcf": {
+        "investing.com": 3.0
+      },
+      "eia": null,
+      "price": {
+        "interval_min": 5,
+        "pre_print": 2.644,
+        "prices": {
+          "0": 2.644,
+          "1": null,
+          "2": null,
+          "5": 2.628,
+          "10": 2.625,
+          "15": 2.624,
+          "30": 2.62,
+          "60": 2.642
+        },
+        "moves": {
+          "0": 0.0,
+          "1": null,
+          "2": null,
+          "5": -0.016,
+          "10": -0.019,
+          "15": -0.02,
+          "30": -0.024,
+          "60": -0.002
+        },
+        "high_1h": 2.654,
+        "low_1h": 2.616
+      }
+    }
+  }
+}
