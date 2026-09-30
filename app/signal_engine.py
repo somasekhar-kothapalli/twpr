@@ -30,7 +30,7 @@ import httpx
 
 from dotenv import load_dotenv
 
-from app import currency, model, options
+from app import currency, model, ng_options, options
 from app.surprise_history import load_history, record_week
 from app.utils.common import (API_REPORT_FILE, CONSENSUS_FILE, DATA_DIR, EIA_ACTUALS_FILE, MARKET_FILE,
                               ROOT, SIGNAL_FILE, SURPRISE_HISTORY_FILE, env, fmt_ts, is_stale, now_ist,
@@ -194,6 +194,9 @@ def load_market(data_dir=None, today=None, allow_stale=False):
 LOT_SIZE_SETTINGS = {"CRUDEOIL": "MCX_CRUDEOIL_LOT_SIZE", "CRUDEOILM": "MCX_CRUDEOILM_LOT_SIZE",
                      "NATURALGAS": "MCX_NATURALGAS_LOT_SIZE", "NATURALGASM": "MCX_NATURALGASM_LOT_SIZE"}
 LOT_COUNT_SETTINGS = {"CRUDEOIL": "MCX_CRUDEOIL_LOTS", "CRUDEOILM": "MCX_CRUDEOILM_LOTS"}
+# Natural gas is record-only (docs/V0_2_SCOPE.md): its lot counts are validated but kept apart, so the crude
+# sizing never sees them.
+NG_LOT_COUNT_SETTINGS = {"NATURALGAS": "MCX_NATURALGAS_LOTS", "NATURALGASM": "MCX_NATURALGASM_LOTS"}
 
 
 def _whole_number(name, what):
@@ -212,15 +215,17 @@ def _whole_number(name, what):
 
 def load_lot_sizes():
     """{contract: barrels (or mmBtu) per lot or None}: the exchange's contract sizes, from MCX_CRUDEOIL_LOT_SIZE
-    (100 bbl), MCX_CRUDEOILM_LOT_SIZE (10 bbl) and, reserved for a future setup, MCX_NATURALGAS_LOT_SIZE and
-    MCX_NATURALGASM_LOT_SIZE. A crude value that is not the contract size MCX publishes is refused: the usual
+    (100 bbl), MCX_CRUDEOILM_LOT_SIZE (10 bbl), MCX_NATURALGAS_LOT_SIZE (1250 MMBtu) and MCX_NATURALGASM_LOT_SIZE
+    (250 MMBtu; natural gas is record-only, nothing reads them). A value that is not the contract size MCX publishes is refused: the usual
     cause is putting the NUMBER OF LOTS here (that goes in MCX_CRUDEOIL_LOTS / MCX_CRUDEOILM_LOTS)."""
     sizes = {contract: _whole_number(name, "barrels") for contract, name in LOT_SIZE_SETTINGS.items()}
     for contract, size in sizes.items():
-        expected = options.CONTRACT_BARRELS.get(contract)
+        expected = options.CONTRACT_BARRELS.get(contract) or ng_options.CONTRACT_MMBTU.get(contract)
         if size is not None and expected is not None and size != expected:
+            unit = "barrels" if contract in options.CONTRACT_BARRELS else "MMBtu"
+            counts = {**LOT_COUNT_SETTINGS, **NG_LOT_COUNT_SETTINGS}
             raise InputError("Invalid setting", f"{LOT_SIZE_SETTINGS[contract]}={size}: MCX's {contract} lot is {expected} "
-                             f"barrels. To set how many lots you trade, use {LOT_COUNT_SETTINGS[contract]}.")
+                             f"{unit}. To set how many lots you trade, use {counts[contract]}.")
     return sizes
 
 
@@ -228,6 +233,11 @@ def load_lot_counts():
     """{contract: lots or None}: how many lots you trade per signal, from MCX_CRUDEOIL_LOTS and
     MCX_CRUDEOILM_LOTS. Whole numbers of at least 1."""
     return {contract: _whole_number(name, "lots") for contract, name in LOT_COUNT_SETTINGS.items()}
+
+
+def load_ng_lot_counts():
+    """{contract: lots or None} from MCX_NATURALGAS_LOTS and MCX_NATURALGASM_LOTS. Nothing uses them yet."""
+    return {contract: _whole_number(name, "lots") for contract, name in NG_LOT_COUNT_SETTINGS.items()}
 
 
 def sigma_method():

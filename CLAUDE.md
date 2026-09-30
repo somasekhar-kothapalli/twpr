@@ -457,6 +457,7 @@ alert only on failure. **Why record only:** an 8-print check found no support fo
 (measured about -0.0009 at 5 minutes), so the model waits for a sample; see `docs/V0_2_SCOPE.md` and
 `docs/NATURAL_GAS_MCX_FACTS.md`. Workflow `twpr_ng_record.yml` (Thursday 17:00 UTC). `sources.INDICATORS["ng_storage"]`
 holds the slugs; storage values carry `Bcf` / `B` suffixes that `to_mb_suffixed` now reads (unit Bcf, not mb).
+`app/ng_options.py` is pure groundwork that **nothing calls yet**: the 2026 NATURALGAS futures calendar (27 Jan, 24 Feb, 26 Mar, 27 Apr, 26 May, 25 Jun, 28 Jul, 26 Aug, 25 Sep, 27 Oct, 24 Nov, 28 Dec; options two business days earlier, e.g. Fri 23 Oct), contract sizes 1250 / 250 MMBtu (MCX symbol NATGASMINI for the mini), Rs 5 strike guide, delta rule and sizing. `MCX_NATURALGAS_LOT_SIZE` / `MCX_NATURALGASM_LOT_SIZE` are validated like the crude ones and `MCX_NATURALGAS_LOTS` / `MCX_NATURALGASM_LOTS` load through `load_ng_lot_counts`, apart from the crude sizing.
 
 ### `app/run.py`, `app/pre_brief.py`, `app/watch.py`, `app/journal.py` — release day and the record
 

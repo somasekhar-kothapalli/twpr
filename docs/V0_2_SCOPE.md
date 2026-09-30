@@ -12,12 +12,13 @@ Why not a model yet: an 8-print check found no support for the assumed price res
 
 - `app/ng_recorder.py`, `app/utils/ng_storage.py`, the `ng_storage` slugs in `sources.py`, `Bcf`/`B` suffix parsing, `NG_RECORD_FILE`.
 - `.github/workflows/twpr_ng_record.yml` (Thursday 17:00 UTC).
+- Groundwork, pure and **not called by anything**: `app/ng_options.py` (2026 futures/option expiry calendar, 1,250 / 250 MMBtu contract sizes, Rs 5 strike guide, delta rule, sizing maths) and validated `MCX_NATURALGAS_LOT_SIZE` / `MCX_NATURALGASM_LOT_SIZE` / `MCX_NATURALGAS_LOTS` / `MCX_NATURALGASM_LOTS` settings (`signal_engine.load_ng_lot_counts`, kept apart from the crude sizing).
 - MCX natural gas contract facts and the review of the blueprint (`docs/NATURAL_GAS_MCX_FACTS.md`).
 - The 8 prints from 6 Aug to 24 Sep 2026, backfilled.
 
 ## Out of scope for now
 
-The natural gas model (Bcf Z-score, 5-year multiplier, regimes), a signal or message, strike guidance and sizing, a natural gas expiry calendar in `options.py`, weather or LNG inputs, any trade. The reserved `MCX_NATURALGAS_*` settings stay unused.
+The natural gas model (Bcf Z-score, 5-year multiplier, regimes), a signal or message, wiring `ng_options` into the engine, weather or LNG inputs, any trade. The natural gas settings are validated but nothing reads them.
 
 ## Decision rule
 
